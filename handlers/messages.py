@@ -258,7 +258,7 @@ async def handle_fsm_essay_text(message: types.Message, state: FSMContext):
 async def handle_general_text_message(message: types.Message):
     user = message.from_user
     chat = message.chat
-    text = message.text
+    text = message.text or ""
     is_private = chat.type == ChatType.PRIVATE
 
     if user:
@@ -266,32 +266,82 @@ async def handle_general_text_message(message: types.Message):
     if not is_private:
         await upsert_group(chat.id, chat.title)
 
-    # 3-tier filter
-    is_valid, reject_reason, clean_text, word_count, task_type, task_prompt = filter_essay_text(text)
+    from services.filter_service import HASHTAG_PATTERN
+    match = HASHTAG_PATTERN.search(text)
+    is_reply = bool(message.reply_to_message and message.reply_to_message.text)
+    replied_text = message.reply_to_message.text.strip() if is_reply else ""
 
-    # GURUHDA: Agar Reply orqali savolga javob berilgan bo'lsa, savolni reply_to_message dan olamiz!
-    if is_valid and not task_prompt and message.reply_to_message and message.reply_to_message.text:
-        # Check that replied message is not from bot itself
-        replied_text = message.reply_to_message.text.strip()
-        if not replied_text.startswith("📥") and not replied_text.startswith("📊"):
-            task_prompt = replied_text
-            logger.info(f"Extracted task_prompt from replied message: {task_prompt[:40]}...")
-
-    # Guruhda filtrdan o'tmagan oddiy suhbat bo'lsa jim turamiz
-    if not is_private and not is_valid:
-        return
-
-    # Shaxsiy chatda hashtag bo'lmasa, foydalanuvchiga qulay FSM menyusini ko'rsatamiz
-    if is_private and not is_valid:
-        if reject_reason != "Bot komandasi":
-            await message.reply(
-                f"Assalomu alaykum! Insho tekshirish uchun pastdagi <b>«✍️ Yangi insho tekshirish»</b> tugmasini bosing yoki xabaringizga <code>#task2</code> (yoki <code>#essay</code>) hashtag qo'shing.",
-                parse_mode="HTML",
-                reply_markup=get_start_keyboard(),
+    # ----------------------------------------------------
+    # GURUHDA 1-HOLAT: Ustoz / Admin savol tashlaganda (#task2 ...)
+    # ----------------------------------------------------
+    if not is_private and match and not is_reply:
+        clean_prompt = HASHTAG_PATTERN.sub("", text).strip()
+        words = count_words(clean_prompt)
+        # Agar so'zlar soni 5 dan 45 tagacha bo'lsa - bu insho emas, SAVOL/TOPIC!
+        if 5 <= words < 40:
+            matched_tag = match.group(1).lower()
+            t_type = "Task 1" if matched_tag == "task1" else "Task 2"
+            ack_topic = (
+                f"📌 <b>Yangi IELTS topshirig'i ({t_type}) qabul qilindi!</b>\n\n"
+                f"📝 <i>\"{clean_prompt}\"</i>\n\n"
+                f"👇 Talabalar ushbu xabarga <b>Reply (Javob berish)</b> qilib o'z insholarini yozishlari mumkin. "
+                f"Bot inshoni avtomatik tekshirib, IELTS mezonlari bo'yicha baholaydi."
             )
-        return
+            await message.reply(ack_topic, parse_mode="HTML")
+            return
 
-    # Limit tekshiruvi
+    # ----------------------------------------------------
+    # GURUHDA 2-HOLAT: Talaba savolga Reply qilib insho yuborganda
+    # ----------------------------------------------------
+    task_type = "Task 2"
+    task_prompt = None
+    clean_text = None
+    word_count = 0
+
+    if not is_private and is_reply:
+        raw_words = count_words(text)
+        # Reply qilingan xabarda mavzu yoki botning topshiriq xabari bormi?
+        replied_has_tag = bool(HASHTAG_PATTERN.search(replied_text))
+        is_bot_topic = "topshirig'i" in replied_text.lower() or "📝" in replied_text
+
+        if raw_words >= 40 and (match or replied_has_tag or is_bot_topic):
+            clean_text = HASHTAG_PATTERN.sub("", text).strip()
+            word_count = count_words(clean_text)
+            task_type = "Task 1" if "task 1" in replied_text.lower() or (match and "task1" in match.group(1).lower()) else "Task 2"
+
+            # Savol matnini tozalab olish
+            clean_prompt = HASHTAG_PATTERN.sub("", replied_text).strip()
+            if '\"' in clean_prompt:
+                parts = clean_prompt.split('\"')
+                if len(parts) >= 2:
+                    clean_prompt = parts[1]
+            task_prompt = clean_prompt
+            logger.info(f"Group Reply detected as essay! Prompt: {task_prompt[:40]}...")
+
+    # Agar yuqoridagi Reply holati bo'lmasa, standart 3-tier filtrdan o'tkazamiz
+    if clean_text is None:
+        is_valid, reject_reason, clean_text, word_count, task_type, task_prompt = filter_essay_text(text)
+
+        # Agar bu reply bo'lsa va task_prompt hali yo'q bo'lsa, reply_to_message dan olamiz
+        if is_valid and not task_prompt and is_reply:
+            if not replied_text.startswith("📥") and not replied_text.startswith("📊"):
+                task_prompt = HASHTAG_PATTERN.sub("", replied_text).strip()
+
+        # Guruhda insho bo'lmagan oddiy suhbatlarga jim turamiz
+        if not is_private and not is_valid:
+            return
+
+        # Shaxsiy chatda hashtag bo'lmasa FSM menyusini chiqaramiz
+        if is_private and not is_valid:
+            if reject_reason != "Bot komandasi":
+                await message.reply(
+                    f"Assalomu alaykum! Insho tekshirish uchun pastdagi <b>«✍️ Yangi insho tekshirish»</b> tugmasini bosing yoki xabaringizga <code>#task2</code> (yoki <code>#essay</code>) hashtag qo'shing.",
+                    parse_mode="HTML",
+                    reply_markup=get_start_keyboard(),
+                )
+            return
+
+    # Limit tekshiruvi (Admin 7326292681 uchun cheksiz)
     user_id = user.id if user else 0
     is_allowed, limit_msg = await check_and_increment_limits(
         user_id=user_id, chat_id=chat.id, is_private=is_private

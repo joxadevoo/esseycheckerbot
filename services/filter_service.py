@@ -29,7 +29,7 @@ def parse_task_components(clean_text: str, default_task_type: str = "Task 2") ->
         task_type = "Task 2"
 
     prompt_patterns = [
-        r"(?:task_prompt|topic|question|savol)\s*:\s*(.+?)(?:\n\s*(?:essay_text|essay|insho|javob)\s*:\s*|\n\n)(.+)",
+        r"(?:task_prompt|topic|question|savol)\s*:\s*(.+?)(?:\n\s*(?:essay_text|essay|insho|javob)\s*:\s*|\n\n|\n)(.+)",
     ]
 
     for pat in prompt_patterns:
@@ -37,7 +37,8 @@ def parse_task_components(clean_text: str, default_task_type: str = "Task 2") ->
         if m:
             task_prompt = m.group(1).strip()
             essay_body = m.group(2).strip()
-            return task_type, task_prompt, essay_body
+            if count_words(essay_body) >= 15:
+                return task_type, task_prompt, essay_body
 
     return task_type, None, clean_text
 
