@@ -87,9 +87,11 @@ STEP 5 - OVERALL BAND
   - if the average ends in .75 -> round UP to the nearest .0 or .5
   - e.g. 6.25 -> 6.0 | 6.75 -> 7.0 | 6.5 stays 6.5
 
-STEP 6 - NEXT TARGET
+STEP 6 - NEXT TARGET & WEAKEST CRITERIA
 - next_target = overall + 0.5 (if overall = 9.0, next_target = 9.0)
 - Identify which 1-2 criteria are the LOWEST-scoring - these are the priority for advice.
+- CRITICAL: If all 4 criteria have the SAME band, weakest_criteria MUST be an empty array [] (since none is relatively weaker than others).
+- Only list criteria in weakest_criteria if they are STRICTLY LOWER than at least one other criterion.
 - advice must be based ONLY on what the descriptor for next_target requires that is currently missing 
   (compare current band's descriptor language vs next_target's descriptor language for the weakest criteria).
 

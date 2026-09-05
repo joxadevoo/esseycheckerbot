@@ -95,9 +95,18 @@ def format_detailed_feedback(feedback: Dict[str, Any], word_count: int) -> str:
         f"• ✍️ <b>Grammatical Accuracy:</b> Band {gr_band}" + (f"\n  <i>↳ {gr_reason}</i>" if gr_reason else "") + "\n",
     ]
 
+    criterion_labels = {
+        "task_response": "Task Response",
+        "task_achievement": "Task Achievement",
+        "coherence_cohesion": "Coherence & Cohesion",
+        "lexical_resource": "Lexical Resource",
+        "grammatical_accuracy": "Grammar Accuracy",
+    }
     if weakest:
-        weakest_str = ", ".join(str(w) for w in weakest)
-        report.append(f"⚠️ <b>Eng zaif mezonlar:</b> {weakest_str}\n")
+        weakest_str = ", ".join(criterion_labels.get(w, str(w)) for w in weakest)
+        report.append(f"⚠️ <b>E'tibor qaratish kerak bo'lgan mezonlar:</b> {weakest_str}\n")
+    else:
+        report.append("🌟 <b>Barcha mezonlar birdek yuqori darajada muvozanatlashgan!</b>\n")
 
     if errors:
         report.append("🔍 <b>Aniqlangan real xatolar va qoidalar:</b>")
