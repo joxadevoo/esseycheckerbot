@@ -44,15 +44,22 @@ async def start_health_server(port: int = 8080):
 
 
 async def main():
+    # 1. Start Healthcheck HTTP Server IMMEDIATELY so Render/Cloud port scan detects it
+    health_runner = None
+    try:
+        health_runner = await start_health_server(port=settings.PORT)
+    except Exception as e:
+        logger.warning(f"Could not start HTTP health server on port {settings.PORT}: {e}")
+
     if not settings.BOT_TOKEN or settings.BOT_TOKEN == "placeholder_bot_token":
         logger.warning(
             "DIQQAT: .env faylida BOT_TOKEN ko'rsatilmadi! Iltimos, .env faylini to'ldiring."
         )
 
-    # 1. Initialize Database tables
+    # 2. Initialize Database tables
     await init_db()
 
-    # 2. Setup Bot & Dispatcher
+    # 3. Setup Bot & Dispatcher
     bot = Bot(
         token=settings.BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
@@ -72,20 +79,13 @@ async def main():
             f"Telegram API ulanishida ogohlantirish (Token hali kiritilmagan bo'lishi mumkin): {e}"
         )
 
-    # 3. Start background AI Workers (default 3 concurrent workers)
+    # 4. Start background AI Workers (default 3 concurrent workers)
     NUM_WORKERS = 3
     worker_tasks = []
     for i in range(1, NUM_WORKERS + 1):
         task = asyncio.create_task(start_worker(bot, bot_username, worker_id=i))
         worker_tasks.append(task)
     logger.info(f"{NUM_WORKERS} ta mustaqil AI Worker orqa fonda ishga tushirildi.")
-
-    # 4. Start Healthcheck HTTP Server for UptimeRobot
-    health_runner = None
-    try:
-        health_runner = await start_health_server(port=settings.PORT)
-    except Exception as e:
-        logger.warning(f"Could not start HTTP health server on port {settings.PORT}: {e}")
 
     # 5. Start Bot Polling or Webhook
     try:
