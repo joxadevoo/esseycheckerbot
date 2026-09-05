@@ -23,6 +23,7 @@ class Settings(BaseSettings):
 
     WEBHOOK_URL: Optional[str] = None
     WEBHOOK_PORT: int = 8000
+    PORT: int = 8080
 
     ADMIN_IDS: str = "7326292681"
 

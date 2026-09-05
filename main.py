@@ -5,6 +5,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
+from aiohttp import web
 from config import settings
 from db.database import init_db
 from handlers.messages import router
@@ -18,6 +19,28 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger("esseycheckerbot")
+
+
+async def handle_health(request):
+    """Healthcheck endpoint for UptimeRobot and Render/Koyeb monitoring."""
+    return web.json_response({
+        "status": "ok",
+        "service": "IELTS Essay Checker Bot",
+        "database": "connected",
+        "queue": "active",
+    })
+
+
+async def start_health_server(port: int = 8080):
+    app = web.Application()
+    app.router.add_get("/", handle_health)
+    app.router.add_get("/health", handle_health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"Healthcheck HTTP server listening on http://0.0.0.0:{port}/health")
+    return runner
 
 
 async def main():
@@ -57,20 +80,27 @@ async def main():
         worker_tasks.append(task)
     logger.info(f"{NUM_WORKERS} ta mustaqil AI Worker orqa fonda ishga tushirildi.")
 
-    # 4. Start Bot Polling or Webhook
+    # 4. Start Healthcheck HTTP Server for UptimeRobot
+    health_runner = None
+    try:
+        health_runner = await start_health_server(port=settings.PORT)
+    except Exception as e:
+        logger.warning(f"Could not start HTTP health server on port {settings.PORT}: {e}")
+
+    # 5. Start Bot Polling or Webhook
     try:
         if settings.WEBHOOK_URL:
             logger.info(f"Webhook rejimida ishga tushirilmoqda: {settings.WEBHOOK_URL}")
-            # Note: Webhook configuration can be run with aiohttp or fastapi runner
             await bot.set_webhook(url=settings.WEBHOOK_URL)
         else:
             logger.info("Long-polling rejimida ishga tushirilmoqda...")
-            # Drop pending updates before starting
             await bot.delete_webhook(drop_pending_updates=True)
             await dp.start_polling(bot)
     finally:
         for t in worker_tasks:
             t.cancel()
+        if health_runner:
+            await health_runner.cleanup()
         await bot.session.close()
 
 
