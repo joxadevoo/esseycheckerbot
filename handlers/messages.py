@@ -45,18 +45,6 @@ def get_start_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def get_task_type_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="📝 IELTS Task 2 (Essay)", callback_data="task_type:Task 2"),
-                InlineKeyboardButton(text="📊 IELTS Task 1 (Report)", callback_data="task_type:Task 1"),
-            ],
-            [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="fsm:cancel")],
-        ]
-    )
-
-
 def get_skip_prompt_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -125,10 +113,13 @@ async def handle_start(message: types.Message, state: FSMContext):
 async def handle_new_command(message: types.Message, state: FSMContext):
     if message.chat.type == ChatType.PRIVATE:
         await state.clear()
-        await message.answer(
-            "Qaysi topshiriq turini tekshirmoqchisiz?",
-            reply_markup=get_task_type_keyboard(),
+        await state.update_data(task_type="Task 2")
+        await state.set_state(EssayFSM.waiting_for_prompt)
+        prompt_msg = (
+            "<b>1-Qadam:</b> Insho mavzusi / savolini (Task 2 Prompt) yuboring.\n\n"
+            "<i>💡 Savolni kiritish Task Response bahosini 100% aniq chiqarishga yordam beradi. Agar savol bo'lmasa, «Savolsiz davom etish» tugmasini bosing:</i>"
         )
+        await message.answer(prompt_msg, parse_mode="HTML", reply_markup=get_skip_prompt_keyboard())
 
 
 @router.message(Command("help"))
@@ -142,8 +133,7 @@ async def handle_help(message: types.Message):
         "2. <b>Shaxsiy chatda:</b>\n"
         "   • /new yoki «✍️ Yangi insho tekshirish» tugmasini bosing.\n\n"
         "3. <b>Rasmiy IELTS mezonlari:</b>\n"
-        "   • Task 2 uchun 250+ so'z (kam bo'lsa Task Response 5.5 dan oshmaydi).\n"
-        "   • Task 1 uchun 150+ so'z.\n"
+        "   • Task 2 inshosi uchun 250+ so'z (kam bo'lsa Task Response 5.5 dan oshmaydi).\n"
     )
     await message.answer(help_text, parse_mode="HTML")
 
@@ -155,10 +145,13 @@ async def handle_help(message: types.Message):
 @router.callback_query(F.data == "fsm:start_check")
 async def cb_start_check(query: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await query.message.edit_text(
-        "Qaysi topshiriq turini tekshirmoqchisiz?",
-        reply_markup=get_task_type_keyboard(),
+    await state.update_data(task_type="Task 2")
+    await state.set_state(EssayFSM.waiting_for_prompt)
+    prompt_msg = (
+        "<b>1-Qadam:</b> Insho mavzusi / savolini (Task 2 Prompt) yuboring.\n\n"
+        "<i>💡 Savolni kiritish Task Response bahosini 100% aniq chiqarishga yordam beradi. Agar savol bo'lmasa, «Savolsiz davom etish» tugmasini bosing:</i>"
     )
+    await query.message.edit_text(prompt_msg, parse_mode="HTML", reply_markup=get_skip_prompt_keyboard())
     await query.answer()
 
 
@@ -218,14 +211,12 @@ async def cb_view_report(query: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith("task_type:"))
 async def cb_task_type(query: types.CallbackQuery, state: FSMContext):
-    task_type = query.data.split(":", 1)[1]
-    await state.update_data(task_type=task_type)
+    await state.update_data(task_type="Task 2")
     await state.set_state(EssayFSM.waiting_for_prompt)
 
     prompt_msg = (
-        f"Tanlandi: <b>{task_type}</b> ✅\n\n"
-        f"<b>1-Qadam:</b> Insho mavzusi / savolini (Task Prompt) yuboring.\n\n"
-        f"<i>💡 Savolni kiritish Task Response bahosini 100% aniq chiqarishga yordam beradi. Agar savol bo'lmasa, «Savolsiz davom etish» tugmasini bosing:</i>"
+        "<b>1-Qadam:</b> Insho mavzusi / savolini (Task 2 Prompt) yuboring.\n\n"
+        "<i>💡 Savolni kiritish Task Response bahosini 100% aniq chiqarishga yordam beradi. Agar savol bo'lmasa, «Savolsiz davom etish» tugmasini bosing:</i>"
     )
     await query.message.edit_text(prompt_msg, parse_mode="HTML", reply_markup=get_skip_prompt_keyboard())
     await query.answer()
@@ -338,13 +329,11 @@ async def handle_general_text_message(message: types.Message):
         words = count_words(clean_prompt)
         # Agar so'zlar soni 5 dan 45 tagacha bo'lsa - bu insho emas, SAVOL/TOPIC!
         if 5 <= words < 40:
-            matched_tag = match.group(1).lower()
-            t_type = "Task 1" if matched_tag == "task1" else "Task 2"
             ack_topic = (
-                f"📌 <b>Yangi IELTS topshirig'i ({t_type}) qabul qilindi!</b>\n\n"
+                "📌 <b>Yangi IELTS Task 2 topshirig'i qabul qilindi!</b>\n\n"
                 f"📝 <i>\"{clean_prompt}\"</i>\n\n"
-                f"👇 Talabalar ushbu xabarga <b>Reply (Javob berish)</b> qilib o'z insholarini yozishlari mumkin. "
-                f"Bot inshoni avtomatik tekshirib, IELTS mezonlari bo'yicha baholaydi."
+                "👇 Talabalar ushbu xabarga <b>Reply (Javob berish)</b> qilib o'z insholarini yozishlari mumkin. "
+                "Bot inshoni avtomatik tekshirib, IELTS mezonlari bo'yicha baholaydi."
             )
             await message.reply(ack_topic, parse_mode="HTML")
             return
@@ -366,7 +355,7 @@ async def handle_general_text_message(message: types.Message):
         if raw_words >= 40 and (match or replied_has_tag or is_bot_topic):
             clean_text = HASHTAG_PATTERN.sub("", text).strip()
             word_count = count_words(clean_text)
-            task_type = "Task 1" if "task 1" in replied_text.lower() or (match and "task1" in match.group(1).lower()) else "Task 2"
+            task_type = "Task 2"
 
             # Savol matnini tozalab olish
             clean_prompt = HASHTAG_PATTERN.sub("", replied_text).strip()

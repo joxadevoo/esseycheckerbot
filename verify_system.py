@@ -86,6 +86,12 @@ async def run_tests():
     assert is_v3, "Failed valid #insho regex variation passed"
     print("✅ Valid #insho regex variation passed")
 
+    # Rejected #task1 test
+    sample_t1_var = sample_essey.replace("#essey", "#task1")
+    is_v_t1, _, _, _, _, _ = filter_essay_text(sample_t1_var)
+    assert not is_v_t1, "#task1 should be rejected now"
+    print("✅ #task1 rejection verified (Only Task 2 allowed)")
+
     # 2. Hash & Cache consistency
     print("\n--- 2. Testing SHA-256 Hashing ---")
     hash1 = compute_essay_hash("  This Is An ESSAY!   With spaces. ")
