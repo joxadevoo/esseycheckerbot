@@ -8,6 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+from config import settings
 from db.database import (
     upsert_user,
     upsert_group,
@@ -84,7 +85,24 @@ async def handle_start(message: types.Message, state: FSMContext):
             essay_id = int(essay_id_str)
             async with get_session() as session:
                 essay = await session.get(Essay, essay_id)
-                if essay and essay.feedback_json:
+                if not essay:
+                    await message.answer(
+                        "⚠️ <b>Hisobot topilmadi yoki oʻchirilgan boʻlishi mumkin.</b>",
+                        parse_mode="HTML",
+                    )
+                    return
+
+                # Check if current user is the essay author or admin
+                user_id = user.id if user else 0
+                if essay.user_id != user_id and not settings.is_admin(user_id):
+                    await message.answer(
+                        "🚫 <b>Ruxsat berilmadi!</b>\n\n"
+                        "Bu sizga tegishli essay emas. Faqat insho yuborgan foydalanuvchi ushbu hisobotni koʻra oladi.",
+                        parse_mode="HTML",
+                    )
+                    return
+
+                if essay.feedback_json:
                     feedback = json.loads(essay.feedback_json)
                     report = format_detailed_feedback(feedback, essay.word_count)
                     chunks = split_message_text(report)
@@ -155,6 +173,47 @@ async def cb_cancel(query: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await query.message.edit_text("Tekshirish bekor qilindi.", reply_markup=get_start_keyboard())
     await query.answer()
+
+
+@router.callback_query(F.data.startswith("report:") | F.data.startswith("view_report:"))
+async def cb_view_report(query: types.CallbackQuery):
+    data = query.data or ""
+    essay_id_str = data.split(":")[-1]
+    if not essay_id_str.isdigit():
+        await query.answer("Xatolik yuz berdi.", show_alert=True)
+        return
+
+    essay_id = int(essay_id_str)
+    user = query.from_user
+    user_id = user.id if user else 0
+
+    async with get_session() as session:
+        essay = await session.get(Essay, essay_id)
+        if not essay:
+            await query.answer("⚠️ Hisobot topilmadi.", show_alert=True)
+            return
+
+        if essay.user_id != user_id and not settings.is_admin(user_id):
+            await query.answer(
+                "🚫 Bu sizga tegishli essay emas! Sizda uni koʻrish uchun ruxsat yoʻq.",
+                show_alert=True,
+            )
+            return
+
+        if essay.feedback_json:
+            feedback = json.loads(essay.feedback_json)
+            report = format_detailed_feedback(feedback, essay.word_count)
+            chunks = split_message_text(report)
+            try:
+                for chunk in chunks:
+                    await query.bot.send_message(chat_id=user_id, text=chunk, parse_mode="HTML")
+                await query.answer("✅ Toʻliq hisobot shaxsiy botingizga yuborildi!", show_alert=True)
+            except Exception:
+                bot_me = await query.bot.get_me()
+                await query.answer(
+                    f"⚠️ Hisobotni olish uchun avval botga kiring: @{bot_me.username}",
+                    show_alert=True,
+                )
 
 
 @router.callback_query(F.data.startswith("task_type:"))
