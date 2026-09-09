@@ -51,9 +51,13 @@ async def main():
     except Exception as e:
         logger.warning(f"Could not start HTTP health server on port {settings.PORT}: {e}")
 
+    env_name = settings.model_config.get("env_file", ".env")
+    mode_name = "TEST / DEV" if "--test" in sys.argv else "PRODUCTION"
+    logger.info(f"🚀 Bot ishga tushirilmoqda... Rejim: [{mode_name}] (Fayl: {env_name})")
+
     if not settings.BOT_TOKEN or settings.BOT_TOKEN == "placeholder_bot_token":
         logger.warning(
-            "DIQQAT: .env faylida BOT_TOKEN ko'rsatilmadi! Iltimos, .env faylini to'ldiring."
+            f"DIQQAT: {env_name} faylida BOT_TOKEN ko'rsatilmadi! Iltimos, {env_name} faylini to'ldiring."
         )
 
     # 2. Initialize Database tables

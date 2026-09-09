@@ -7,9 +7,10 @@ MIN_WORD_COUNT = 40
 
 
 def count_words(text: str) -> int:
-    """Counts actual words in the text."""
-    words = re.findall(r"\b\w+\b", text)
-    return len(words)
+    """Counts actual words in the text using IELTS whitespace standards (hyphenated words and contractions count as 1)."""
+    if not text:
+        return 0
+    return len(text.strip().split())
 
 
 def parse_task_components(clean_text: str, default_task_type: str = "Task 2") -> Tuple[str, Optional[str], str]:

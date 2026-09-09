@@ -13,6 +13,7 @@ from services.cache_service import (
 )
 from services.ai_service import ai_service
 from services.queue_service import queue_service
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +85,11 @@ def format_detailed_feedback(feedback: Dict[str, Any], word_count: int) -> str:
     weakest = feedback.get("weakest_criteria", [])
     advice = feedback.get("advice_for_next_0.5_band_uz") or feedback.get("band7_advice", "")
 
+    model_name = feedback.get("_model") or (settings.OPENAI_MODEL if settings.AI_PROVIDER == "openai" else settings.GROQ_MODEL)
+    model_badge = f" <code>[{model_name}]</code>" if model_name else ""
+
     report = [
-        f"📊 <b>IELTS WRITING TAHLILI ({task_type})</b>",
+        f"📊 <b>IELTS WRITING TAHLILI ({task_type})</b>{model_badge}",
         f"📝 <b>So'zlar soni:</b> {actual_words} ta ({min_badge})",
         f"🏆 <b>Umumiy Ball: Band {overall}</b>" + (f" <i>(Keyingi maqsad: Band {next_target})</i>\n" if next_target else "\n"),
         "<b>Mezonlar bo'yicha rasmiy baholar:</b>",
@@ -153,6 +157,7 @@ async def process_task(bot: Bot, task: Dict[str, Any], bot_username: str):
                 essay_text=essay_text,
                 task_type=task_type,
                 task_prompt=task_prompt,
+                word_count=word_count,
             )
             await save_cached_evaluation(essay_hash, feedback)
 

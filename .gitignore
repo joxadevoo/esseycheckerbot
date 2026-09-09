@@ -1,5 +1,9 @@
 # Secrets & Environment variables
 .env
+.env.test
+.env.*
+!.env.example
+!.env.test.example
 .env.local
 
 # Databases
