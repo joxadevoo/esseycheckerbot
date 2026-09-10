@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from sqlalchemy import select, and_
 
 from config import settings
-from db.models import Base, User, Group, Essay, DailyUsage
+from db.models import Base, User, Group, Essay, DailyUsage, GroupTopic, GroupMemberRole
 
 logger = logging.getLogger(__name__)
 
@@ -183,3 +183,150 @@ async def get_cached_essay_by_hash(essay_hash: str) -> Optional[Essay]:
         )
         result = await session.execute(stmt)
         return result.scalar_one_or_none()
+
+
+async def get_group_topic(chat_id: int) -> Optional[GroupTopic]:
+    """Retrieves active IELTS topic for a specific group."""
+    async with get_session() as session:
+        return await session.get(GroupTopic, chat_id)
+
+
+async def set_group_topic(
+    chat_id: int,
+    topic_text: str,
+    message_id: Optional[int] = None,
+    created_by: Optional[int] = None,
+    announcement_msg_id: Optional[int] = None,
+) -> GroupTopic:
+    """Sets or updates the active IELTS topic for a group."""
+    async with get_session() as session:
+        topic = await session.get(GroupTopic, chat_id)
+        if not topic:
+            topic = GroupTopic(
+                chat_id=chat_id,
+                topic_text=topic_text,
+                message_id=message_id,
+                created_by=created_by,
+                announcement_msg_id=announcement_msg_id,
+            )
+            session.add(topic)
+        else:
+            topic.topic_text = topic_text
+            topic.message_id = message_id
+            topic.created_by = created_by
+            if announcement_msg_id is not None:
+                topic.announcement_msg_id = announcement_msg_id
+        await session.commit()
+        await session.refresh(topic)
+        return topic
+
+
+async def clear_group_topic(chat_id: int) -> bool:
+    """Removes the active topic for a group."""
+    async with get_session() as session:
+        topic = await session.get(GroupTopic, chat_id)
+        if topic:
+            await session.delete(topic)
+            await session.commit()
+            return True
+        return False
+
+
+async def set_group_user_role(
+    chat_id: int,
+    username: str,
+    role: str = "teacher",
+    assigned_by: Optional[int] = None,
+    user_id: Optional[int] = None,
+) -> GroupMemberRole:
+    """Assigns or updates a role (teacher/admin) for a username in a group."""
+    clean_username = username.strip().lstrip("@").lower()
+    async with get_session() as session:
+        stmt = select(GroupMemberRole).where(
+            and_(
+                GroupMemberRole.chat_id == chat_id,
+                GroupMemberRole.username == clean_username,
+            )
+        )
+        res = await session.execute(stmt)
+        record = res.scalar_one_or_none()
+        if not record:
+            record = GroupMemberRole(
+                chat_id=chat_id,
+                username=clean_username,
+                role=role.lower(),
+                assigned_by=assigned_by,
+                user_id=user_id,
+            )
+            session.add(record)
+        else:
+            record.role = role.lower()
+            record.assigned_by = assigned_by
+            if user_id:
+                record.user_id = user_id
+        await session.commit()
+        await session.refresh(record)
+        return record
+
+
+async def remove_group_user_role(chat_id: int, username: str) -> bool:
+    """Removes a role assigned to a username in a group."""
+    clean_username = username.strip().lstrip("@").lower()
+    async with get_session() as session:
+        stmt = select(GroupMemberRole).where(
+            and_(
+                GroupMemberRole.chat_id == chat_id,
+                GroupMemberRole.username == clean_username,
+            )
+        )
+        res = await session.execute(stmt)
+        record = res.scalar_one_or_none()
+        if record:
+            await session.delete(record)
+            await session.commit()
+            return True
+        return False
+
+
+async def get_group_roles(chat_id: int) -> list[GroupMemberRole]:
+    """Returns all custom assigned roles for a group."""
+    async with get_session() as session:
+        stmt = (
+            select(GroupMemberRole)
+            .where(GroupMemberRole.chat_id == chat_id)
+            .order_by(GroupMemberRole.created_at.asc())
+        )
+        res = await session.execute(stmt)
+        return list(res.scalars().all())
+
+
+async def check_user_role_in_group(
+    chat_id: int,
+    username: Optional[str],
+    user_id: Optional[int] = None,
+) -> Optional[str]:
+    """
+    Returns role ('teacher' or 'admin') if the user has one explicitly set in this group.
+    Matches by username or user_id.
+    """
+    clean_username = username.strip().lstrip("@").lower() if username else None
+    async with get_session() as session:
+        conditions = []
+        if clean_username:
+            conditions.append(GroupMemberRole.username == clean_username)
+        if user_id:
+            conditions.append(GroupMemberRole.user_id == user_id)
+
+        if not conditions:
+            return None
+
+        from sqlalchemy import or_
+        stmt = select(GroupMemberRole).where(
+            and_(
+                GroupMemberRole.chat_id == chat_id,
+                or_(*conditions),
+            )
+        )
+        res = await session.execute(stmt)
+        record = res.scalar_one_or_none()
+        return record.role if record else None

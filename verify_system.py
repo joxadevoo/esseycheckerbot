@@ -12,12 +12,25 @@ if sys.stdout.encoding != "utf-8":
     except Exception:
         pass
 
-from services.filter_service import filter_essay_text, count_words
+from services.filter_service import filter_essay_text, count_words, is_probable_topic
 from services.cache_service import compute_essay_hash
 from services.worker import split_message_text, format_detailed_feedback
 from services.queue_service import queue_service
-from db.database import init_db, upsert_user, upsert_group, check_and_increment_limits, get_session
-from db.models import User, Group
+from db.database import (
+    init_db,
+    upsert_user,
+    upsert_group,
+    check_and_increment_limits,
+    get_session,
+    get_group_topic,
+    set_group_topic,
+    clear_group_topic,
+    set_group_user_role,
+    remove_group_user_role,
+    get_group_roles,
+    check_user_role_in_group,
+)
+from db.models import User, Group, GroupTopic, GroupMemberRole
 
 
 async def run_tests():
@@ -62,7 +75,7 @@ async def run_tests():
 
     # Valid essay with Topic prompt parsing
     sample_with_topic = (
-        "#task2\n"
+        "#essay\n"
         "Topic: Should higher education be free for all citizens?\n"
         "Essay: Education is an important aspect of modern human society. "
         "Many governments invest substantial amounts of capital into primary and secondary schools. "
@@ -73,6 +86,12 @@ async def run_tests():
     is_v_top, _, clean_body, _, t_type2, t_prompt2 = filter_essay_text(sample_with_topic)
     assert is_v_top and t_prompt2 == "Should higher education be free for all citizens?"
     print(f"✅ Question/Topic prompt extraction verified: '{t_prompt2[:30]}...'")
+
+    # Verify #task2 alone is not treated as essay hashtag
+    sample_task2_essay = sample_essey.replace("#essey", "#task2")
+    is_v_t2, _, _, _, _, _ = filter_essay_text(sample_task2_essay)
+    assert not is_v_t2, "#task2 should NOT be accepted by filter_essay_text (reserved for topics)"
+    print("✅ #task2 reserved for topics (rejected as direct essay hashtag) verified")
 
     # Valid essay with #essay test
     sample_essay_var = sample_essey.replace("#essey", "#essay")
@@ -91,6 +110,17 @@ async def run_tests():
     is_v_t1, _, _, _, _, _ = filter_essay_text(sample_t1_var)
     assert not is_v_t1, "#task1 should be rejected now"
     print("✅ #task1 rejection verified (Only Task 2 allowed)")
+
+    # Test IELTS prompt detection
+    sample_prompt = (
+        "In many countries, an increasing number of young people are leaving their hometowns "
+        "to study or find work in other parts of the country or abroad. "
+        "Do the advantages of this trend outweigh the disadvantages? "
+        "Give reasons for your answer and include any relevant examples."
+    )
+    assert is_probable_topic(sample_prompt), "Failed to detect IELTS prompt"
+    assert not is_probable_topic(sample_essey), "Full essay should not be detected as topic"
+    print("✅ IELTS Topic prompt vs Essay detection passed")
 
     # 2. Hash & Cache consistency
     print("\n--- 2. Testing SHA-256 Hashing ---")
@@ -146,6 +176,55 @@ async def run_tests():
     allowed, msg = await check_and_increment_limits(test_user_id, test_chat_id, is_private=False)
     assert allowed, f"Limit check failed: {msg}"
     print("✅ Regular database user, group, and daily limits verified")
+
+    # Test GroupTopic functionality
+    topic = await set_group_topic(test_chat_id, "Sample IELTS Topic Question", message_id=123, created_by=admin_user_id)
+    assert topic.topic_text == "Sample IELTS Topic Question"
+    fetched = await get_group_topic(test_chat_id)
+    assert fetched is not None and fetched.topic_text == "Sample IELTS Topic Question"
+    
+    # Update topic
+    updated = await set_group_topic(test_chat_id, "Updated Topic Question", message_id=124, created_by=admin_user_id)
+    assert updated.topic_text == "Updated Topic Question"
+    fetched_updated = await get_group_topic(test_chat_id)
+    assert fetched_updated.topic_text == "Updated Topic Question"
+
+    # Clear topic
+    cleared = await clear_group_topic(test_chat_id)
+    assert cleared
+    assert await get_group_topic(test_chat_id) is None
+    print("✅ GroupTopic database operations (set, get, update, clear) verified")
+
+    # Test GroupMemberRole functionality (@username based)
+    # Assign teacher role
+    r_teacher = await set_group_user_role(test_chat_id, "mentor_john", role="teacher", assigned_by=admin_user_id)
+    assert r_teacher.username == "mentor_john"
+    assert r_teacher.role == "teacher"
+
+    # Assign admin role
+    r_admin = await set_group_user_role(test_chat_id, "@deputy_admin", role="admin", assigned_by=admin_user_id)
+    assert r_admin.username == "deputy_admin"  # @ should be stripped and lowercased
+    assert r_admin.role == "admin"
+
+    # Verify check_user_role_in_group
+    assert await check_user_role_in_group(test_chat_id, username="mentor_john") == "teacher"
+    assert await check_user_role_in_group(test_chat_id, username="MENTOR_JOHN") == "teacher"  # case-insensitive
+    assert await check_user_role_in_group(test_chat_id, username="deputy_admin") == "admin"
+    assert await check_user_role_in_group(test_chat_id, username="random_student") is None
+
+    # List roles
+    roles = await get_group_roles(test_chat_id)
+    assert len(roles) == 2
+    assert any(r.username == "mentor_john" and r.role == "teacher" for r in roles)
+    assert any(r.username == "deputy_admin" and r.role == "admin" for r in roles)
+
+    # Remove role
+    del_res = await remove_group_user_role(test_chat_id, "mentor_john")
+    assert del_res is True
+    assert await check_user_role_in_group(test_chat_id, username="mentor_john") is None
+    roles_after = await get_group_roles(test_chat_id)
+    assert len(roles_after) == 1
+    print("✅ GroupMemberRole username-based operations (set, check, list, remove) verified")
 
     # 5. Queue & Worker Service
     print("\n--- 5. Testing Queue Service ---")

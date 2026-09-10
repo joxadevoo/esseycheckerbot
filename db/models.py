@@ -34,6 +34,30 @@ class Group(Base):
     created_at = Column(DateTime, default=func.now())
 
 
+class GroupTopic(Base):
+    __tablename__ = "group_topics"
+
+    chat_id = Column(BigInteger, primary_key=True)
+    topic_text = Column(Text, nullable=False)
+    message_id = Column(BigInteger, nullable=True)
+    announcement_msg_id = Column(BigInteger, nullable=True)
+    created_by = Column(BigInteger, nullable=True)
+    created_at = Column(DateTime, default=func.now())
+
+
+class GroupMemberRole(Base):
+    __tablename__ = "group_member_roles"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    chat_id = Column(BigInteger, index=True, nullable=False)
+    user_id = Column(BigInteger, index=True, nullable=True)
+    username = Column(String(128), index=True, nullable=False)  # Normalized lowercase without '@'
+    role = Column(String(32), default="teacher", nullable=False)  # 'teacher' or 'admin'
+    assigned_by = Column(BigInteger, nullable=True)
+    created_at = Column(DateTime, default=func.now())
+
+
+
 class Essay(Base):
     __tablename__ = "essays"
 

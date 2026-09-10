@@ -1,8 +1,12 @@
 import re
 from typing import Tuple, Optional
 
-# Regex matches #essey, #essay, #insho, #task2 (case-insensitive)
-HASHTAG_PATTERN = re.compile(r"#(essey|essay|insho|task2)\b", re.IGNORECASE)
+# Regex for student essays: #essay, #essey, #insho (case-insensitive)
+HASHTAG_PATTERN = re.compile(r"#(essey|essay|insho)\b", re.IGNORECASE)
+
+# Regex for teacher topics/prompts: #task2, #topic, #savol (case-insensitive)
+TOPIC_HASHTAG_PATTERN = re.compile(r"#(task2|topic|savol)\b", re.IGNORECASE)
+
 MIN_WORD_COUNT = 40
 
 
@@ -36,6 +40,53 @@ def parse_task_components(clean_text: str, default_task_type: str = "Task 2") ->
                 return task_type, task_prompt, essay_body
 
     return task_type, None, clean_text
+
+
+IELTS_TOPIC_KEYWORDS = [
+    r"\bagree\s+or\s+disagree\b",
+    r"\bdiscuss\s+both\s+(?:views|sides)\b",
+    r"\bpositive\s+or\s+negative\s+(?:development|trend|impact)?\b",
+    r"\badvantages\s+(?:and\s+disadvantages|outweigh)\b",
+    r"\bcauses\s+and\s+solutions\b",
+    r"\bproblems?\s+and\s+solutions?\b",
+    r"\bto\s+what\s+extent\b",
+    r"\bwhat\s+are\s+the\s+(?:reasons|causes|solutions|effects)\b",
+    r"\bdo\s+you\s+(?:agree|think|believe)\b",
+    r"\bgive\s+reasons\s+for\s+your\s+answer\b",
+    r"\bwrite\s+about\s+the\s+following\s+topic\b",
+    r"^(?:topic|savol|question|mavzu|prompt)\s*:",
+]
+IELTS_TOPIC_RE = re.compile("|".join(IELTS_TOPIC_KEYWORDS), re.IGNORECASE)
+
+
+def is_probable_topic(text: str) -> bool:
+    """
+    Determines if the given text is an IELTS Task 2 topic/prompt rather than an essay.
+    Criteria:
+    - 5 <= word count < 120
+    - Contains '?' OR IELTS prompt phrasing (agree/disagree, discuss both, etc.) OR explicit topic prefix
+    """
+    if not text:
+        return False
+    words = count_words(text)
+    if words < 5 or words >= 120:
+        return False
+
+    # If the text explicitly has 'Topic: ... \n Essay: ...' with substantial essay body, it's not JUST a topic
+    _, prompt, body = parse_task_components(text)
+    if prompt and count_words(body) >= 30:
+        return False
+
+    # Check for question mark or typical IELTS prompt phrasing
+    if "?" in text or IELTS_TOPIC_RE.search(text):
+        return True
+
+    # Check if text starts with explicit topic marker
+    stripped = text.strip().lower()
+    if stripped.startswith(("topic:", "savol:", "mavzu:", "question:", "prompt:")):
+        return True
+
+    return False
 
 
 def filter_essay_text(text: Optional[str]) -> Tuple[bool, Optional[str], Optional[str], int, str, Optional[str]]:

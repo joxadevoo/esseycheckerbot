@@ -1,9 +1,22 @@
 import asyncio
 import logging
 import sys
+
+if sys.stdout.encoding != "utf-8":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllChatAdministrators,
+    BotCommandScopeAllPrivateChats,
+)
 
 from aiohttp import web
 from config import settings
@@ -43,6 +56,41 @@ async def start_health_server(port: int = 8080):
     return runner
 
 
+async def setup_bot_commands(bot: Bot):
+    """Configures Telegram command menus for Groups and Private chats."""
+    try:
+        # 1. Guruhdagi barcha a'zolar uchun buyruqlar:
+        group_commands = [
+            BotCommand(command="new", description="✍️ Yangi savol / sessiya boshlash"),
+            BotCommand(command="topic", description="📌 Guruhdagi faol savolni ko'rish"),
+            BotCommand(command="help", description="ℹ️ Guruhda foydalanish qoidalari"),
+        ]
+        await bot.set_my_commands(group_commands, scope=BotCommandScopeAllGroupChats())
+
+        # 2. Guruh adminlari va ustozlar uchun buyruqlar:
+        admin_group_commands = [
+            BotCommand(command="new", description="✍️ Yangi savol / sessiya boshlash"),
+            BotCommand(command="topic", description="📌 Guruhdagi faol savolni ko'rish"),
+            BotCommand(command="stop", description="🛑 Faol savol qabulini to'xtatish"),
+            BotCommand(command="ustoz", description="👨‍🏫 Ustoz tayinlash (/ustoz @mentor)"),
+            BotCommand(command="admin", description="🛡 Yangi admin biriktirish (/admin @username)"),
+            BotCommand(command="ustozlar", description="👥 Guruh ustozlari va adminlari ro'yxati"),
+            BotCommand(command="help", description="ℹ️ Qo'llanma va boshqaruv"),
+        ]
+        await bot.set_my_commands(admin_group_commands, scope=BotCommandScopeAllChatAdministrators())
+
+        # 3. Shaxsiy chat uchun buyruqlar menyusi:
+        private_commands = [
+            BotCommand(command="start", description="🚀 Botni ishga tushirish"),
+            BotCommand(command="new", description="✍️ Yangi sessiya (savol va insho tekshirish)"),
+            BotCommand(command="help", description="ℹ️ Yordam va IELTS mezonlari"),
+        ]
+        await bot.set_my_commands(private_commands, scope=BotCommandScopeAllPrivateChats())
+        logger.info("Telegram buyruqlar menyusi ('/' menyusi) muvaffaqiyatli sozlandi.")
+    except Exception as e:
+        logger.warning(f"Buyruqlar menyusini sozlashda xatolik: {e}")
+
+
 async def main():
     # 1. Start Healthcheck HTTP Server IMMEDIATELY so Render/Cloud port scan detects it
     health_runner = None
@@ -78,6 +126,9 @@ async def main():
         bot_user = await bot.get_me()
         bot_username = bot_user.username or "esseychecker_bot"
         logger.info(f"Bot muvaffaqiyatli ishga tushdi: @{bot_username} (ID: {bot_user.id})")
+        
+        # Setup Telegram commands menu ('/' belgisi bosilganda chiqadigan buyruqlar)
+        await setup_bot_commands(bot)
     except Exception as e:
         logger.warning(
             f"Telegram API ulanishida ogohlantirish (Token hali kiritilmagan bo'lishi mumkin): {e}"
