@@ -715,7 +715,11 @@ async def cb_teacher_group_report(query: types.CallbackQuery):
         await deliver_teacher_group_report(bot, user.id, gid, status_message=load_msg)
     except Exception as e:
         logger.error(f"Error delivering teacher group report: {e}", exc_info=True)
-        await load_msg.edit_text(f"⚠️ Hisobot tayyorlashda xatolik: {e}")
+        await load_msg.edit_text(
+            "⚠️ <b>Kechirasiz, hisobot tayyorlashda nosozlik yuz berdi.</b>\n"
+            "Biz uni tuzatish ustida ishlayapmiz. Iltimos, birozdan so'ng qayta urinib ko'ring.",
+            parse_mode="HTML",
+        )
 
 
 @router.callback_query(F.data == "teacher:back_home")

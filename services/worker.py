@@ -226,8 +226,8 @@ async def process_task(bot: Bot, task: Dict[str, Any], bot_username: str):
     except Exception as e:
         logger.error(f"Error processing essay task: {e}", exc_info=True)
         error_msg = (
-            f"❌ {user_mention}, kechirasiz, inshoni tekshirishda xatolik yuz berdi.\n"
-            f"Iltimos, birozdan so'ng qayta yuborib ko'ring."
+            f"⚠️ Kechirasiz {user_mention}, botda vaqtinchalik nosozlik yuz berdi.\n\n"
+            f"Biz uni tuzatish ustida ishlayapmiz. Iltimos, birozdan so'ng qayta urinib ko'ring."
         )
         try:
             await bot.send_message(

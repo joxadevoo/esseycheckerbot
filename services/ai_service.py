@@ -476,7 +476,7 @@ class AIService:
                     await asyncio.sleep(sleep_sec)
 
         logger.error(f"Failed to evaluate essay after {max_retries} attempts: {last_error}")
-        raise RuntimeError(f"AI xizmati vaqtincha javob bera olmadi: {last_error}")
+        raise RuntimeError("Kechirasiz, botda vaqtinchalik nosozlik yuz berdi. Biz uni tuzatish ustida ishlayapmiz.")
 
 
 ai_service = AIService()
