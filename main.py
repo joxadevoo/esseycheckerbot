@@ -71,6 +71,7 @@ async def setup_bot_commands(bot: Bot):
         admin_group_commands = [
             BotCommand(command="new", description="✍️ Yangi savol / sessiya boshlash"),
             BotCommand(command="topic", description="📌 Guruhdagi faol savolni ko'rish"),
+            BotCommand(command="report", description="📊 Guruh hisoboti va natijalar"),
             BotCommand(command="stop", description="🛑 Faol savol qabulini to'xtatish"),
             BotCommand(command="ustoz", description="👨‍🏫 Ustoz tayinlash (/ustoz @mentor)"),
             BotCommand(command="admin", description="🛡 Yangi admin biriktirish (/admin @username)"),

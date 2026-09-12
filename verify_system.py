@@ -29,8 +29,18 @@ from db.database import (
     remove_group_user_role,
     get_group_roles,
     check_user_role_in_group,
+    get_group_topic_submissions,
+    get_student_historical_scores,
+    get_group_tracked_users,
+    get_user_teacher_groups,
 )
-from db.models import User, Group, GroupTopic, GroupMemberRole
+from db.models import User, Group, GroupTopic, GroupMemberRole, Essay
+from services.report_service import (
+    calculate_group_report_data,
+    format_report_text,
+    generate_report_chart,
+    generate_report_excel,
+)
 
 
 async def run_tests():
@@ -245,6 +255,180 @@ async def run_tests():
     assert dequeued_task is not None, "Failed to dequeue task"
     assert dequeued_task["user_id"] == test_user_id, "Dequeued payload mismatch"
     print("✅ Dequeue verified successfully")
+
+    # 6. Teacher Report & Analytics Service
+    print("\n--- 6. Testing Teacher Report, Visual Chart & Excel Export ---")
+    import json
+    from datetime import datetime, timezone
+
+    # Setup active topic
+    rep_topic = await set_group_topic(test_chat_id, "Should universities focus on practical employment skills?", message_id=500, created_by=admin_user_id)
+
+    # Insert test users
+    student_1_id = test_user_id  # 999888777
+    student_2_id = 111222333
+    student_3_id = 444555666  # will not submit
+
+    await upsert_user(student_1_id, "student_one", "Student One")
+    await upsert_user(student_2_id, "student_two", "Student Two")
+    await upsert_user(student_3_id, "student_three", "Student Three")
+
+    # Insert historical essay 1 for student 1 (band 6.0)
+    fb_s1_old = json.dumps({"overall": 6.0, "task_response": 6.0, "coherence": 6.0, "lexical": 6.0, "grammar": 6.0})
+    fb_s1_new = json.dumps({"overall": 6.5, "task_response": 6.5, "coherence": 6.5, "lexical": 7.0, "grammar": 6.0})
+    fb_s2 = json.dumps({
+        "current_overall_band": 7.5,
+        "word_count": 290,
+        "scores_by_official_descriptors": {
+            "task_response": {"band": 7.5, "reason_uz": "Mavzu to'liq yoritilgan"},
+            "coherence_cohesion": {"band": 7.5, "reason_uz": "Mantiqiy bog'lanish a'lo"},
+            "lexical_resource": {"band": 8.0, "reason_uz": "Keng lug'at boyligi"},
+            "grammatical_accuracy": {"band": 7.0, "reason_uz": "Kam grammatik xato"}
+        }
+    })
+
+    from sqlalchemy import delete
+    async with get_session() as session:
+        await session.execute(delete(Essay).where(Essay.chat_id == test_chat_id))
+        await session.commit()
+
+    async with get_session() as session:
+        # Prior essays (from 7 days ago)
+        past_time = datetime(2026, 9, 1, 10, 0, 0)
+        now_time = datetime(2026, 9, 10, 12, 0, 0)
+
+        e_old = Essay(
+            user_id=student_1_id,
+            chat_id=test_chat_id,
+            message_id=200,
+            essay_hash="hash_old_1",
+            original_text="Old essay body...",
+            word_count=255,
+            overall_band=6.0,
+            feedback_json=fb_s1_old,
+            created_at=past_time,
+        )
+        session.add(e_old)
+        # Prior essay for student 3 (so student 3 is in tracked_users, but hasn't submitted for this topic)
+        e_s3 = Essay(
+            user_id=student_3_id,
+            chat_id=test_chat_id,
+            message_id=201,
+            essay_hash="hash_s3",
+            original_text="Student 3 older essay...",
+            word_count=240,
+            overall_band=5.5,
+            feedback_json=fb_s1_old,
+            created_at=past_time,
+        )
+        session.add(e_s3)
+        await session.commit()
+
+        # Current submissions for the active topic
+        e_s1_current = Essay(
+            user_id=student_1_id,
+            chat_id=test_chat_id,
+            message_id=501,
+            essay_hash="hash_s1_curr",
+            original_text="Current essay student 1...",
+            word_count=275,
+            overall_band=6.5,
+            feedback_json=fb_s1_new,
+            created_at=now_time,
+        )
+        e_s2_current = Essay(
+            user_id=student_2_id,
+            chat_id=test_chat_id,
+            message_id=502,
+            essay_hash="hash_s2_curr",
+            original_text="Current essay student 2...",
+            word_count=290,
+            overall_band=7.5,
+            feedback_json=fb_s2,
+            created_at=now_time,
+        )
+        session.add(e_s1_current)
+        session.add(e_s2_current)
+        await session.commit()
+
+    # Query submissions
+    submissions = await get_group_topic_submissions(test_chat_id, since=rep_topic.created_at)
+    assert len(submissions) >= 2, f"Expected at least 2 submissions, got {len(submissions)}"
+
+    # Query historical scores map
+    hist_map = {}
+    for es, _ in submissions:
+        hist_map[es.user_id] = await get_student_historical_scores(test_chat_id, es.user_id)
+
+    # Tracked users
+    tracked_users = await get_group_tracked_users(test_chat_id)
+    assert any(u.id == student_3_id for u in tracked_users)
+
+    # Calculate report data
+    report_data = calculate_group_report_data(
+        topic=rep_topic,
+        submissions=submissions,
+        historical_scores_map=hist_map,
+        tracked_users=tracked_users,
+        total_members_count=10,
+    )
+
+    assert report_data["submitted_count"] == 2
+    assert report_data["total_members"] == 10
+    assert report_data["not_submitted_count"] == 8
+    assert report_data["max_band"] == 7.5
+    assert report_data["min_band"] == 6.5
+    assert report_data["average_band"] == 7.0
+
+    # Student 2 should be ranked 1st with 7.5 and medal 🥇
+    s_first = report_data["students"][0]
+    assert s_first["user_id"] == student_2_id
+    assert s_first["overall"] == 7.5
+    assert s_first["medal"] == "🥇"
+    assert s_first["trend"] == "new"
+    assert s_first["tr"] == "7.5"
+    assert s_first["cc"] == "7.5"
+    assert s_first["lr"] == "8.0"
+    assert s_first["gra"] == "7.0"
+
+    # Student 1 should be ranked 2nd with 6.5, medal 🥈, and delta +0.5
+    s_second = report_data["students"][1]
+    assert s_second["user_id"] == student_1_id
+    assert s_second["overall"] == 6.5
+    assert s_second["medal"] == "🥈"
+    assert s_second["trend"] == "up"
+    assert s_second["delta"] == 0.5
+    print("✅ Teacher Report data aggregation & progress dynamics (+0.5 growth) verified")
+    print("✅ IELTS Criteria (TR, CC, LR, GRA) extracted accurately from descriptors")
+
+    # Format text report
+    text_report = format_report_text(report_data)
+    assert "IELTS Task 2: Guruh Natijalari Hisoboti" in text_report
+    assert "@student_two" in text_report and "7.5" in text_report
+    assert "@student_one" in text_report and "6.5" in text_report
+    assert "TR: 7.5 | CC: 7.5 | LR: 8.0 | GRA: 7.0" in text_report
+    assert "📈 (+0.5)" in text_report
+    assert "@student_three" in text_report  # in not_submitted list
+    print("✅ Formatted Telegram HTML text report verified")
+
+    # Test get_user_teacher_groups query
+    t_groups = await get_user_teacher_groups("deputy_admin")
+    assert any(gid == test_chat_id for gid, _ in t_groups)
+    print("✅ Teacher Groups query (get_user_teacher_groups) verified")
+
+    # Generate Chart Image (PNG)
+    chart_png = generate_report_chart(report_data)
+    assert isinstance(chart_png, bytes)
+    assert len(chart_png) > 1000, "PNG image bytes too small"
+    assert chart_png[:8] == b"\x89PNG\r\n\x1a\n", "Invalid PNG header"
+    print(f"✅ Matplotlib chart generation verified ({len(chart_png)} bytes PNG)")
+
+    # Generate Excel Report (XLSX)
+    excel_bytes = generate_report_excel(report_data)
+    assert isinstance(excel_bytes, bytes)
+    assert len(excel_bytes) > 1000, "Excel bytes too small"
+    assert excel_bytes[:4] == b"PK\x03\x04", "Invalid ZIP/XLSX header"
+    print(f"✅ Excel spreadsheet export verified ({len(excel_bytes)} bytes XLSX)")
 
     print("\n========================================")
     print("🎉 ALL TESTS PASSED SUCCESSFULLY!")

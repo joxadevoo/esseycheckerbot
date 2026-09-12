@@ -1,9 +1,9 @@
 import logging
-from datetime import date
+from datetime import date, datetime, timedelta
 from contextlib import asynccontextmanager
 from typing import Optional, Tuple
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, func
 
 from config import settings
 from db.models import Base, User, Group, Essay, DailyUsage, GroupTopic, GroupMemberRole
@@ -214,6 +214,7 @@ async def set_group_topic(
             topic.topic_text = topic_text
             topic.message_id = message_id
             topic.created_by = created_by
+            topic.created_at = func.now()
             if announcement_msg_id is not None:
                 topic.announcement_msg_id = announcement_msg_id
         await session.commit()
@@ -330,3 +331,101 @@ async def check_user_role_in_group(
         res = await session.execute(stmt)
         record = res.scalar_one_or_none()
         return record.role if record else None
+
+
+async def get_group_topic_submissions(
+    chat_id: int, since: Optional[datetime] = None
+) -> list[tuple[Essay, Optional[User]]]:
+    """Retrieves all essays submitted in a group, optionally since a given datetime, along with user info."""
+    async with get_session() as session:
+        stmt = (
+            select(Essay, User)
+            .outerjoin(User, Essay.user_id == User.id)
+            .where(Essay.chat_id == chat_id)
+        )
+        if since:
+            safe_since = since - timedelta(seconds=5)
+            stmt = stmt.where(Essay.created_at >= safe_since)
+        stmt = stmt.order_by(Essay.created_at.asc())
+        res = await session.execute(stmt)
+        return list(res.all())
+
+
+async def get_student_historical_scores(chat_id: int, user_id: int) -> list[float]:
+    """Returns all overall band scores for a student in this group in chronological order."""
+    async with get_session() as session:
+        stmt = (
+            select(Essay.overall_band)
+            .where(and_(Essay.chat_id == chat_id, Essay.user_id == user_id))
+            .order_by(Essay.created_at.asc())
+        )
+        res = await session.execute(stmt)
+        return [b for b in res.scalars().all() if b is not None]
+
+
+async def get_group_tracked_users(chat_id: int) -> list[User]:
+    """Returns all users who have ever submitted an essay in this group."""
+    async with get_session() as session:
+        stmt = (
+            select(User)
+            .join(Essay, Essay.user_id == User.id)
+            .where(Essay.chat_id == chat_id)
+            .distinct()
+        )
+        res = await session.execute(stmt)
+        return list(res.scalars().all())
+
+
+async def get_user_teacher_groups(
+    username: Optional[str], user_id: Optional[int] = None
+) -> list[tuple[int, str]]:
+    """
+    Returns a list of (chat_id, group_title) for all groups where this user
+    is registered as a teacher or admin, or where they created a topic,
+    or all groups if whitelist admin.
+    """
+    clean_username = username.strip().lstrip("@").lower() if username else None
+    async with get_session() as session:
+        # Check if whitelist admin
+        if user_id and settings.is_admin(user_id):
+            stmt = select(Group.id, Group.title).order_by(Group.title.asc())
+            res = await session.execute(stmt)
+            return [(gid, gtitle or f"Guruh #{gid}") for gid, gtitle in res.all()]
+
+        groups_map: dict[int, str] = {}
+
+        conditions = []
+        if clean_username:
+            conditions.append(GroupMemberRole.username == clean_username)
+        if user_id:
+            conditions.append(GroupMemberRole.user_id == user_id)
+
+        if conditions:
+            from sqlalchemy import or_
+            stmt = (
+                select(GroupMemberRole.chat_id, Group.title)
+                .outerjoin(Group, GroupMemberRole.chat_id == Group.id)
+                .where(
+                    and_(
+                        GroupMemberRole.role.in_(["teacher", "admin"]),
+                        or_(*conditions),
+                    )
+                )
+            )
+            res = await session.execute(stmt)
+            for gid, gtitle in res.all():
+                groups_map[gid] = gtitle or f"Guruh #{gid}"
+
+        # Also check GroupTopic created_by
+        if user_id:
+            stmt_topics = (
+                select(GroupTopic.chat_id, Group.title)
+                .outerjoin(Group, GroupTopic.chat_id == Group.id)
+                .where(GroupTopic.created_by == user_id)
+            )
+            res_t = await session.execute(stmt_topics)
+            for gid, gtitle in res_t.all():
+                if gid not in groups_map:
+                    groups_map[gid] = gtitle or f"Guruh #{gid}"
+
+        return list(groups_map.items())

@@ -6,7 +6,7 @@ from aiogram.filters import CommandStart, Command
 from aiogram.enums import ChatType
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 
 from config import settings
 from db.database import (
@@ -21,8 +21,18 @@ from db.database import (
     remove_group_user_role,
     get_group_roles,
     check_user_role_in_group,
+    get_group_topic_submissions,
+    get_student_historical_scores,
+    get_group_tracked_users,
+    get_user_teacher_groups,
 )
 from db.models import Essay
+from services.report_service import (
+    calculate_group_report_data,
+    format_report_text,
+    generate_report_chart,
+    generate_report_excel,
+)
 from services.filter_service import (
     filter_essay_text,
     count_words,
@@ -78,19 +88,24 @@ class EssayFSM(StatesGroup):
     waiting_for_essay = State()
 
 
-def get_start_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✍️ Yangi insho tekshirish", callback_data="fsm:start_check"
-                )
-            ],
-            [
-                InlineKeyboardButton(text="ℹ️ Qoidalar va Yordam", callback_data="fsm:help"),
-            ],
-        ]
-    )
+def get_start_keyboard(is_teacher: bool = False) -> InlineKeyboardMarkup:
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text="✍️ Yangi insho tekshirish", callback_data="fsm:start_check"
+            )
+        ],
+    ]
+    if is_teacher:
+        buttons.append([
+            InlineKeyboardButton(
+                text="🏫 Mening guruhlarim (Ustoz hisoboti)", callback_data="teacher:my_groups"
+            )
+        ])
+    buttons.append([
+        InlineKeyboardButton(text="ℹ️ Qoidalar va Yordam", callback_data="fsm:help"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def get_skip_prompt_keyboard() -> InlineKeyboardMarkup:
@@ -132,8 +147,23 @@ async def handle_start(message: types.Message, state: FSMContext):
     if user:
         await upsert_user(user.id, user.username, user.full_name)
 
-    # Deep linking check (e.g. /start report_12)
+    # Deep linking check (e.g. /start report_12 or /start groupreport_-1001234)
     parts = (message.text or "").split(maxsplit=1)
+    if len(parts) > 1 and parts[1].startswith("groupreport_"):
+        gid_str = parts[1].replace("groupreport_", "")
+        try:
+            target_gid = int(gid_str)
+            can_see = await is_teacher_or_admin(message.bot, target_gid, user)
+            if can_see:
+                load_msg = await message.answer("⏳ <i>Guruh hisoboti va grafiklar yuklanmoqda...</i>", parse_mode="HTML")
+                await deliver_teacher_group_report(message.bot, user.id, target_gid, status_message=load_msg)
+                return
+            else:
+                await message.answer("🚫 Ushbu guruh hisobotini faqat uning ustozi yoki admini ko'ra oladi.")
+                return
+        except Exception as e:
+            logger.error(f"Error delivering deep-link group report: {e}", exc_info=True)
+
     if len(parts) > 1 and parts[1].startswith("report_"):
         essay_id_str = parts[1].replace("report_", "")
         if essay_id_str.isdigit():
@@ -171,21 +201,29 @@ async def handle_start(message: types.Message, state: FSMContext):
         group_welcome_text = (
             f"Assalomu alaykum! 👋\n\n"
             f"🤖 <b>IELTS Writing AI Examiner</b> guruhingizda faol.\n\n"
-            f"📌 <b>Ustoz uchun:</b> Yangi mavzu / savol kiritish uchun <code>#task2 [Savol matni]</code> yuboring.\n"
+            f"📌 <b>Ustoz uchun:</b> Yangi mavzu / savol kiritish uchun <code>/new [Savol]</code> yoki <code>#task2 [Savol matni]</code> yuboring.\n"
             f"✍️ <b>Oʻquvchilar uchun:</b> Savolga <b>Reply (Javob)</b> qilib insho yuboring yoki guruhga <code>#essay [insho]</code> deb tashlang.\n\n"
             f"<i>Bot insholarni avtomatik tekshirib, IELTS mezonlari boʻyicha baholab boradi.</i>"
         )
         await message.answer(group_welcome_text, parse_mode="HTML")
         return
 
+    teacher_groups = await get_user_teacher_groups(user.username, user.id) if user else []
+    is_teacher = len(teacher_groups) > 0
+
     welcome_text = (
         f"Assalomu alaykum, <b>{user.full_name if user else 'doʻstim'}</b>! 👋\n\n"
         f"Men <b>IELTS Writing AI Examiner</b> botiman.\n\n"
         f"🎯 <b>Imkoniyatlar:</b>\n"
         f"• <b>Shaxsiy chatda:</b> Pastdagi <b>«✍️ Yangi insho tekshirish»</b> tugmasini bosing — savol va inshoni bosqichma-bosqich yuboring.\n"
-        f"• <b>Guruhda:</b> Ustoz <code>#task2 [Savol]</code> bilan mavzu e'lon qiladi. O'quvchilar savolga <b>Reply</b> qilib yoki <code>#essay</code> bilan o'z insholarini yuborishadi!"
+        f"• <b>Guruhda:</b> Ustoz <code>/new</code> yoki <code>#task2</code> bilan mavzu e'lon qiladi. O'quvchilar savolga <b>Reply</b> qilib yoki <code>#essay</code> bilan o'z insholarini yuborishadi!"
     )
-    await message.answer(welcome_text, parse_mode="HTML", reply_markup=get_start_keyboard())
+    if is_teacher:
+        welcome_text += (
+            f"\n\n👨‍🏫 <b>Ustoz bo'limi:</b> Siz <b>{len(teacher_groups)} ta</b> guruhda ustoz/admin sifatida qayd etilgansiz. "
+            f"Guruhdagi o'quvchilar natijalari, tahliliy grafik va Excel hisobotlarini olish uchun pastdagi <b>«🏫 Mening guruhlarim»</b> tugmasini bosing."
+        )
+    await message.answer(welcome_text, parse_mode="HTML", reply_markup=get_start_keyboard(is_teacher=is_teacher))
 
 
 @router.message(Command("check"))
@@ -477,6 +515,220 @@ async def handle_list_roles_command(message: types.Message):
 
     lines.append("\n<i>Yangi qo'shish uchun: /ustoz @username</i>")
     await message.reply("\n".join(lines), parse_mode="HTML")
+
+
+async def deliver_teacher_group_report(
+    bot,
+    target_user_id: int,
+    group_chat_id: int,
+    status_message: Optional[types.Message] = None,
+):
+    """Generates the full report for group_chat_id and delivers it directly to target_user_id's private chat."""
+    # 1. Faol mavzuni olish (agar mavjud bo'lsa)
+    active_topic = await get_group_topic(group_chat_id)
+    topic_since = active_topic.created_at if active_topic else None
+
+    # 2. Mavzu bo'yicha insholarni olish
+    submissions = await get_group_topic_submissions(group_chat_id, since=topic_since)
+
+    # 3. Guruhdagi barcha o'quvchilar va a'zolar soni
+    tracked_users = await get_group_tracked_users(group_chat_id)
+
+    # Telegram guruhidagi jami a'zolar sonini aniqlash
+    total_members_count = None
+    try:
+        total_members_count = await bot.get_chat_member_count(group_chat_id)
+    except Exception:
+        pass
+
+    # 4. O'quvchilarning oldingi ballari (tarixi)
+    historical_scores_map = {}
+    for essay, _ in submissions:
+        uid = essay.user_id
+        if uid not in historical_scores_map:
+            scores = await get_student_historical_scores(group_chat_id, uid)
+            historical_scores_map[uid] = scores
+
+    # 5. Hisobot ma'lumotlarini hisoblash
+    report_data = calculate_group_report_data(
+        topic=active_topic,
+        submissions=submissions,
+        historical_scores_map=historical_scores_map,
+        tracked_users=tracked_users,
+        total_members_count=total_members_count,
+    )
+
+    # 6. Formatlash: Matn, Grafik (PNG), Excel (XLSX)
+    report_text = format_report_text(report_data)
+    chart_bytes = generate_report_chart(report_data)
+    excel_bytes = generate_report_excel(report_data)
+
+    # 7. Shaxsiy chatga yuborish
+    # Rasm va xulosa matni
+    chart_photo = BufferedInputFile(chart_bytes, filename="ielts_group_report.png")
+    if len(report_text) <= 1024:
+        await bot.send_photo(chat_id=target_user_id, photo=chart_photo, caption=report_text, parse_mode="HTML")
+    else:
+        await bot.send_photo(chat_id=target_user_id, photo=chart_photo)
+        chunks = split_message_text(report_text, max_length=4000)
+        for chunk in chunks:
+            await bot.send_message(chat_id=target_user_id, text=chunk, parse_mode="HTML")
+
+    # Excel hujjati va qaytish tugmalari
+    doc_name = f"IELTS_Hisobot_{abs(group_chat_id)}.xlsx"
+    excel_doc = BufferedInputFile(excel_bytes, filename=doc_name)
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🔄 Yangilash", callback_data=f"teacher:report:{group_chat_id}"),
+                InlineKeyboardButton(text="🔙 Guruhlarim ro'yxati", callback_data="teacher:my_groups"),
+            ]
+        ]
+    )
+    await bot.send_document(
+        chat_id=target_user_id,
+        document=excel_doc,
+        caption="📊 <b>Batafsil Excel hisoboti</b> (baholar, mezonlar va so'zlar soni bilan)",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+
+    if status_message:
+        try:
+            await status_message.delete()
+        except Exception:
+            pass
+
+
+@router.message(Command("report"))
+@router.message(Command("hisobot"))
+@router.message(Command("stats"))
+async def handle_report_command(message: types.Message):
+    user = message.from_user
+    bot = message.bot
+
+    # 1-HOLAT: Shaxsiy chatda chaqirilsa
+    if message.chat.type == ChatType.PRIVATE:
+        await show_teacher_groups(message)
+        return
+
+    # 2-HOLAT: Guruhda chaqirilganda
+    can_view = await is_teacher_or_admin(bot, message.chat.id, user)
+    if not can_view:
+        await message.reply(
+            "🚫 Guruh hisobotini faqat <b>Ustoz</b> yoki <b>Admin</b> ko'rishi mumkin.",
+            parse_mode="HTML",
+        )
+        return
+
+    bot_user = await bot.get_me()
+    bot_username = bot_user.username or "esseycheckerbot"
+
+    # Guruhda katta hisobotlarni tashlamaymiz — shaxsiy chatga yuboramiz!
+    status_msg = await message.reply("⏳ <i>Hisobot tayyorlanmoqda va shaxsiy chatingizga yuborilmoqda...</i>", parse_mode="HTML")
+
+    try:
+        # Shaxsiy chatga yuborishga urinib ko'ramiz:
+        await deliver_teacher_group_report(bot, user.id, message.chat.id)
+        mention = user.mention_html()
+        await status_msg.edit_text(
+            f"📩 <b>Hurmatli ustoz {mention}, guruh hisoboti, tahliliy grafik va Excel jadvali shaxsiy chatingizga yuborildi!</b>\n\n"
+            f"👉 <a href=\"https://t.me/{bot_username}\">Botga o'tib hisobotni ko'rish</a>",
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        logger.warning(f"Could not send PM report directly to teacher {user.id}: {e}")
+        mention = user.mention_html()
+        await status_msg.edit_text(
+            f"⚠️ <b>Hurmatli ustoz {mention}, hisobotni shaxsiy chatingizda olishingiz uchun iltimos botga kiring va Start bosing:</b>\n\n"
+            f"👉 <a href=\"https://t.me/{bot_username}?start=groupreport_{message.chat.id}\">Botni ochish va hisobotni olish</a>\n\n"
+            f"<i>(Guruh umumiy xabarida o'quvchilar hisobotini ochiq qoldirmaslik uchun shaxsiy chatda beriladi).</i>",
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+
+@router.message(Command("mygroups"))
+@router.message(Command("guruhlarim"))
+@router.callback_query(F.data == "teacher:my_groups")
+async def show_teacher_groups(event: types.Message | types.CallbackQuery):
+    user = event.from_user
+    is_callback = isinstance(event, types.CallbackQuery)
+
+    groups = await get_user_teacher_groups(user.username, user.id)
+    if not groups:
+        text = (
+            "ℹ️ <b>Siz hali birorta guruhda Ustoz yoki Admin sifatida biriktirilmagansiz.</b>\n\n"
+            "Guruh admini sizni ustoz qilib belgilashi uchun guruhda quyidagicha yozishi lozim:\n"
+            f"<code>/ustoz @{user.username or 'username'}</code>"
+        )
+        if is_callback:
+            await event.message.edit_text(text, parse_mode="HTML", reply_markup=get_start_keyboard(is_teacher=False))
+            await event.answer()
+        else:
+            await event.answer(text, parse_mode="HTML")
+        return
+
+    buttons = []
+    for gid, gtitle in groups:
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"👥 {gtitle}",
+                callback_data=f"teacher:report:{gid}",
+            )
+        ])
+    buttons.append([InlineKeyboardButton(text="🔙 Bosh menyu", callback_data="teacher:back_home")])
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    text = (
+        "👨‍🏫 <b>Mening guruhlarim:</b>\n\n"
+        "Siz quyidagi guruhlarda ustoz/admin sifatida qayd etilgansiz. "
+        "O'quvchilar tahlili, grafik va Excel hisobotini shaxsiy chatingizda olish uchun kerakli guruhni tanlang:"
+    )
+    if is_callback:
+        await event.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        await event.answer()
+    else:
+        await event.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("teacher:report:"))
+async def cb_teacher_group_report(query: types.CallbackQuery):
+    user = query.from_user
+    bot = query.bot
+    gid_str = query.data.replace("teacher:report:", "")
+    try:
+        gid = int(gid_str)
+    except ValueError:
+        await query.answer("Noto'g'ri guruh ID", show_alert=True)
+        return
+
+    can_see = await is_teacher_or_admin(bot, gid, user)
+    if not can_see:
+        await query.answer("Siz ushbu guruhda ustoz emassiz!", show_alert=True)
+        return
+
+    await query.answer("Hisobot yuklanmoqda...")
+    load_msg = await query.message.answer("⏳ <i>Guruh hisoboti va grafiklar yuklanmoqda...</i>", parse_mode="HTML")
+    try:
+        await deliver_teacher_group_report(bot, user.id, gid, status_message=load_msg)
+    except Exception as e:
+        logger.error(f"Error delivering teacher group report: {e}", exc_info=True)
+        await load_msg.edit_text(f"⚠️ Hisobot tayyorlashda xatolik: {e}")
+
+
+@router.callback_query(F.data == "teacher:back_home")
+async def cb_teacher_back_home(query: types.CallbackQuery):
+    user = query.from_user
+    teacher_groups = await get_user_teacher_groups(user.username, user.id)
+    is_teacher = len(teacher_groups) > 0
+    welcome_text = (
+        f"Assalomu alaykum, <b>{user.full_name}</b>! 👋\n\n"
+        f"Bosh menyuga qaytdingiz. Kerakli bo'limni tanlang:"
+    )
+    await query.message.edit_text(welcome_text, parse_mode="HTML", reply_markup=get_start_keyboard(is_teacher=is_teacher))
+    await query.answer()
 
 
 # ----------------------------------------------------
