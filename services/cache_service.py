@@ -8,19 +8,29 @@ from db.database import get_cached_essay_by_hash
 
 logger = logging.getLogger(__name__)
 
+import time
+
 # Optional Redis connection
 _redis_client = None
+_redis_last_attempt = 0
+REDIS_COOLDOWN = 60  # seconds between reconnection attempts if unreachable
 
 async def get_redis():
-    global _redis_client
-    if settings.REDIS_URL and _redis_client is None:
+    global _redis_client, _redis_last_attempt
+    if _redis_client is not None:
+        return _redis_client
+
+    now = time.time()
+    if settings.REDIS_URL and (now - _redis_last_attempt > REDIS_COOLDOWN):
+        _redis_last_attempt = now
         try:
             import redis.asyncio as aioredis
-            _redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
-            await _redis_client.ping()
+            client = aioredis.from_url(settings.REDIS_URL, decode_responses=True, socket_connect_timeout=2)
+            await client.ping()
+            _redis_client = client
             logger.info("Connected to Redis cache successfully.")
         except Exception as e:
-            logger.warning(f"Could not connect to Redis at {settings.REDIS_URL}: {e}. Falling back to DB cache.")
+            logger.warning(f"Could not connect to Redis at {settings.REDIS_URL}: {e}. Falling back to DB cache/in-memory queue (cooldown {REDIS_COOLDOWN}s).")
             _redis_client = None
     return _redis_client
 

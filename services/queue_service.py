@@ -11,9 +11,54 @@ REDIS_QUEUE_KEY = "essay_queue:pending"
 
 # Fallback in-memory queue for zero-dependency local development
 _memory_queue = asyncio.Queue()
+_inflight_memory_users = set()
+
+
+async def _cleanup_memory_inflight(user_id: int, delay: int):
+    try:
+        await asyncio.sleep(delay)
+        _inflight_memory_users.discard(user_id)
+    except Exception:
+        pass
 
 
 class QueueService:
+    @staticmethod
+    async def is_user_inflight(user_id: int) -> bool:
+        """Checks if a user already has an essay evaluation currently in progress."""
+        r = await get_redis()
+        if r:
+            try:
+                exists = await r.exists(f"inflight_user:{user_id}")
+                if exists:
+                    return True
+            except Exception:
+                pass
+        return user_id in _inflight_memory_users
+
+    @staticmethod
+    async def set_user_inflight(user_id: int, ttl: int = 45):
+        """Marks user as having an active evaluation in progress (auto-expires after ttl seconds)."""
+        r = await get_redis()
+        if r:
+            try:
+                await r.set(f"inflight_user:{user_id}", "1", ex=ttl)
+            except Exception:
+                pass
+        _inflight_memory_users.add(user_id)
+        asyncio.create_task(_cleanup_memory_inflight(user_id, ttl))
+
+    @staticmethod
+    async def clear_user_inflight(user_id: int):
+        """Clears in-flight lock once evaluation finishes."""
+        r = await get_redis()
+        if r:
+            try:
+                await r.delete(f"inflight_user:{user_id}")
+            except Exception:
+                pass
+        _inflight_memory_users.discard(user_id)
+
     @staticmethod
     async def enqueue(payload: Dict[str, Any]) -> int:
         """

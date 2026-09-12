@@ -1,4 +1,5 @@
 import asyncio
+import html
 import json
 import logging
 from typing import Dict, Any, List
@@ -72,7 +73,7 @@ def format_detailed_feedback(feedback: Dict[str, Any], word_count: int) -> str:
         data = descriptors.get(key) or descriptors.get(alt_key or key) or feedback.get(key) or feedback.get(alt_key or key)
         if isinstance(data, dict):
             band = data.get("band", "N/A")
-            reason = data.get("reason_uz", "")
+            reason = data.get("reason_uz") or data.get("reason", "")
             return band, reason
         return data if data is not None else "N/A", ""
 
@@ -80,6 +81,12 @@ def format_detailed_feedback(feedback: Dict[str, Any], word_count: int) -> str:
     cc_band, cc_reason = get_criterion_info("coherence_cohesion", "coherence")
     lr_band, lr_reason = get_criterion_info("lexical_resource", "lexical")
     gr_band, gr_reason = get_criterion_info("grammatical_accuracy", "grammar")
+
+    # Sanitize dynamic texts against HTML injection
+    tr_reason_safe = html.escape(str(tr_reason)) if tr_reason else ""
+    cc_reason_safe = html.escape(str(cc_reason)) if cc_reason else ""
+    lr_reason_safe = html.escape(str(lr_reason)) if lr_reason else ""
+    gr_reason_safe = html.escape(str(gr_reason)) if gr_reason else ""
 
     errors = feedback.get("real_errors_only") or feedback.get("errors", [])
     weakest = feedback.get("weakest_criteria", [])
@@ -93,10 +100,10 @@ def format_detailed_feedback(feedback: Dict[str, Any], word_count: int) -> str:
         f"📝 <b>So'zlar soni:</b> {actual_words} ta ({min_badge})",
         f"🏆 <b>Umumiy Ball: Band {overall}</b>" + (f" <i>(Keyingi maqsad: Band {next_target})</i>\n" if next_target else "\n"),
         "<b>Mezonlar bo'yicha rasmiy baholar:</b>",
-        f"• 📌 <b>Task Response:</b> Band {tr_band}" + (f"\n  <i>↳ {tr_reason}</i>" if tr_reason else ""),
-        f"• 🔗 <b>Coherence & Cohesion:</b> Band {cc_band}" + (f"\n  <i>↳ {cc_reason}</i>" if cc_reason else ""),
-        f"• 📚 <b>Lexical Resource:</b> Band {lr_band}" + (f"\n  <i>↳ {lr_reason}</i>" if lr_reason else ""),
-        f"• ✍️ <b>Grammatical Accuracy:</b> Band {gr_band}" + (f"\n  <i>↳ {gr_reason}</i>" if gr_reason else "") + "\n",
+        f"• 📌 <b>Task Response:</b> Band {tr_band}" + (f"\n  <i>↳ {tr_reason_safe}</i>" if tr_reason_safe else ""),
+        f"• 🔗 <b>Coherence & Cohesion:</b> Band {cc_band}" + (f"\n  <i>↳ {cc_reason_safe}</i>" if cc_reason_safe else ""),
+        f"• 📚 <b>Lexical Resource:</b> Band {lr_band}" + (f"\n  <i>↳ {lr_reason_safe}</i>" if lr_reason_safe else ""),
+        f"• ✍️ <b>Grammatical Accuracy:</b> Band {gr_band}" + (f"\n  <i>↳ {gr_reason_safe}</i>" if gr_reason_safe else "") + "\n",
     ]
 
     criterion_labels = {
@@ -107,7 +114,7 @@ def format_detailed_feedback(feedback: Dict[str, Any], word_count: int) -> str:
         "grammatical_accuracy": "Grammar Accuracy",
     }
     if weakest:
-        weakest_str = ", ".join(criterion_labels.get(w, str(w)) for w in weakest)
+        weakest_str = ", ".join(html.escape(criterion_labels.get(w, str(w))) for w in weakest)
         report.append(f"⚠️ <b>E'tibor qaratish kerak bo'lgan mezonlar:</b> {weakest_str}\n")
     else:
         report.append("🌟 <b>Barcha mezonlar birdek yuqori darajada muvozanatlashgan!</b>\n")
@@ -115,9 +122,9 @@ def format_detailed_feedback(feedback: Dict[str, Any], word_count: int) -> str:
     if errors:
         report.append("🔍 <b>Aniqlangan real xatolar va qoidalar:</b>")
         for i, e in enumerate(errors[:8], 1):
-            wrong = e.get("wrong") or e.get("original", "")
-            correct = e.get("correct") or e.get("correction", "")
-            rule = e.get("rule_uz") or e.get("why_uz") or e.get("explanation", "")
+            wrong = html.escape(str(e.get("wrong") or e.get("original", "")))
+            correct = html.escape(str(e.get("correct") or e.get("correction", "")))
+            rule = html.escape(str(e.get("rule_uz") or e.get("why_uz") or e.get("explanation", "")))
             report.append(
                 f"{i}. ❌ <i>\"{wrong}\"</i>\n"
                 f"   ✅ <b>{correct}</b>\n"
@@ -129,7 +136,7 @@ def format_detailed_feedback(feedback: Dict[str, Any], word_count: int) -> str:
 
     if advice:
         target_str = f"Band {next_target}" if next_target else "+0.5 Ball"
-        report.append(f"💡 <b>{target_str} ga chiqish uchun aniq maslahat:</b>\n{advice}\n")
+        report.append(f"💡 <b>{target_str} ga chiqish uchun aniq maslahat:</b>\n{html.escape(str(advice))}\n")
 
     return "\n".join(report)
 
@@ -237,6 +244,11 @@ async def process_task(bot: Bot, task: Dict[str, Any], bot_username: str):
             )
         except Exception:
             pass
+    finally:
+        try:
+            await queue_service.clear_user_inflight(user_id)
+        except Exception as clr_err:
+            logger.warning(f"Error clearing inflight status for user {user_id}: {clr_err}")
 
 
 async def start_worker(bot: Bot, bot_username: str, worker_id: int = 1):

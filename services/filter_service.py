@@ -8,6 +8,7 @@ HASHTAG_PATTERN = re.compile(r"#(essey|essay|insho)\b", re.IGNORECASE)
 TOPIC_HASHTAG_PATTERN = re.compile(r"#(task2|topic|savol)\b", re.IGNORECASE)
 
 MIN_WORD_COUNT = 40
+MAX_WORD_COUNT = 500
 
 
 def count_words(text: str) -> int:
@@ -94,7 +95,7 @@ def filter_essay_text(text: Optional[str]) -> Tuple[bool, Optional[str], Optiona
     Applies the 3-tier filter to incoming text:
     1. Filter: Not a bot command (/start, /help, etc.)
     2. Filter: Contains valid essay hashtag (#essey, #essay, #insho, #task2)
-    3. Filter: Minimum word length (>= 40 words)
+    3. Filter: Word count limits (MIN_WORD_COUNT <= words <= MAX_WORD_COUNT)
 
     Returns:
         (is_valid, reject_reason, clean_text, word_count, task_type, task_prompt)
@@ -117,12 +118,22 @@ def filter_essay_text(text: Optional[str]) -> Tuple[bool, Optional[str], Optiona
     raw_clean = HASHTAG_PATTERN.sub("", stripped).strip()
     task_type, task_prompt, clean_essay = parse_task_components(raw_clean, "Task 2")
 
-    # Filter 3: Minimum word count
+    # Filter 3: Word count limits
     words_count = count_words(clean_essay)
     if words_count < MIN_WORD_COUNT:
         return (
             False,
             f"Insho hajmi juda qisqa ({words_count} ta so'z). Kamida {MIN_WORD_COUNT} ta so'z bo'lishi kerak.",
+            None,
+            words_count,
+            task_type,
+            task_prompt,
+        )
+
+    if words_count > MAX_WORD_COUNT:
+        return (
+            False,
+            f"Insho hajmi juda katta ({words_count} ta so'z). IELTS Task 2 inshosi {MAX_WORD_COUNT} ta so'zdan oshmasligi lozim.",
             None,
             words_count,
             task_type,

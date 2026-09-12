@@ -1,3 +1,4 @@
+import html
 import json
 import logging
 from typing import Optional
@@ -39,6 +40,8 @@ from services.filter_service import (
     is_probable_topic,
     HASHTAG_PATTERN,
     TOPIC_HASHTAG_PATTERN,
+    MIN_WORD_COUNT,
+    MAX_WORD_COUNT,
 )
 from services.queue_service import queue_service
 from services.worker import format_detailed_feedback, split_message_text
@@ -663,11 +666,18 @@ async def show_teacher_groups(event: types.Message | types.CallbackQuery):
             "Guruh admini sizni ustoz qilib belgilashi uchun guruhda quyidagicha yozishi lozim:\n"
             f"<code>/ustoz @{user.username or 'username'}</code>"
         )
+        kb_no = get_start_keyboard(is_teacher=False)
         if is_callback:
-            await event.message.edit_text(text, parse_mode="HTML", reply_markup=get_start_keyboard(is_teacher=False))
+            try:
+                if event.message and event.message.text is not None:
+                    await event.message.edit_text(text, parse_mode="HTML", reply_markup=kb_no)
+                else:
+                    await event.message.answer(text, parse_mode="HTML", reply_markup=kb_no)
+            except Exception:
+                await event.message.answer(text, parse_mode="HTML", reply_markup=kb_no)
             await event.answer()
         else:
-            await event.answer(text, parse_mode="HTML")
+            await event.answer(text, parse_mode="HTML", reply_markup=kb_no)
         return
 
     buttons = []
@@ -687,7 +697,13 @@ async def show_teacher_groups(event: types.Message | types.CallbackQuery):
         "O'quvchilar tahlili, grafik va Excel hisobotini shaxsiy chatingizda olish uchun kerakli guruhni tanlang:"
     )
     if is_callback:
-        await event.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        try:
+            if event.message and event.message.text is not None:
+                await event.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+            else:
+                await event.message.answer(text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            await event.message.answer(text, parse_mode="HTML", reply_markup=kb)
         await event.answer()
     else:
         await event.answer(text, parse_mode="HTML", reply_markup=kb)
@@ -731,7 +747,14 @@ async def cb_teacher_back_home(query: types.CallbackQuery):
         f"Assalomu alaykum, <b>{user.full_name}</b>! 👋\n\n"
         f"Bosh menyuga qaytdingiz. Kerakli bo'limni tanlang:"
     )
-    await query.message.edit_text(welcome_text, parse_mode="HTML", reply_markup=get_start_keyboard(is_teacher=is_teacher))
+    kb = get_start_keyboard(is_teacher=is_teacher)
+    try:
+        if query.message and query.message.text is not None:
+            await query.message.edit_text(welcome_text, parse_mode="HTML", reply_markup=kb)
+        else:
+            await query.message.answer(welcome_text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await query.message.answer(welcome_text, parse_mode="HTML", reply_markup=kb)
     await query.answer()
 
 
@@ -930,19 +953,35 @@ async def handle_fsm_essay_text(message: types.Message, state: FSMContext):
     essay_text = message.text.strip()
     words = count_words(essay_text)
 
-    if words < 40:
+    if words < MIN_WORD_COUNT:
         await message.reply(
-            f"⚠️ Insho juda qisqa ({words} ta so'z). Kamida 40 ta so'z bo'lishi kerak. Iltimos to'liqroq yozib qayta yuboring:"
+            f"⚠️ Insho juda qisqa ({words} ta so'z). Kamida {MIN_WORD_COUNT} ta so'z bo'lishi kerak. Iltimos to'liqroq yozib qayta yuboring:"
+        )
+        return
+
+    if words > MAX_WORD_COUNT:
+        await message.reply(
+            f"⚠️ Insho hajmi juda katta ({words} ta so'z). IELTS Task 2 inshosi {MAX_WORD_COUNT} ta so'zdan oshmasligi lozim. Iltimos, ixchamroq qilib qayta yuboring:"
         )
         return
 
     data = await state.get_data()
     task_type = data.get("task_type", "Task 2")
     task_prompt = data.get("task_prompt")
+
+    # Anti-Spam / In-Flight lock check:
+    user_id = user.id if user else 0
+    if await queue_service.is_user_inflight(user_id):
+        await message.reply(
+            "⏳ <b>Inshoingiz hozir tekshirilmoqda!</b>\n\n"
+            "Iltimos, avvalgi insho tahlili yakunlanishini kuting va shundan so'ng yangisini yuboring.",
+            parse_mode="HTML",
+        )
+        return
+
     await state.clear()
 
     # Check daily usage limit
-    user_id = user.id if user else 0
     is_allowed, limit_msg = await check_and_increment_limits(
         user_id=user_id, chat_id=chat.id, is_private=True
     )
@@ -968,8 +1007,9 @@ async def handle_fsm_essay_text(message: types.Message, state: FSMContext):
         "task_prompt": task_prompt,
     }
 
+    await queue_service.set_user_inflight(user_id, ttl=45)
     queue_pos = await queue_service.enqueue(payload)
-    prompt_info = f"\n📌 <i>Savol: \"{task_prompt[:50]}...\"</i>" if task_prompt else ""
+    prompt_info = f"\n📌 <i>Savol: \"{html.escape(task_prompt[:50])}...\"</i>" if task_prompt else ""
     await message.reply(
         f"📥 Inshoingiz qabul qilindi (<b>{task_type}</b>)!{prompt_info}\n"
         f"⏳ Siz navbatda: <b>#{queue_pos}</b>-o'rindasiz.\n\n"
@@ -1131,10 +1171,18 @@ async def handle_general_text_message(message: types.Message):
         active_topic = await get_group_topic(chat.id)
 
         # Agar Reply qilingan bo'lsa va 40+ so'z bo'lsa (savolga reply, bot e'loniga reply yoki faol mavzu mavjud):
-        if raw_words >= 40 and (replied_has_topic or is_bot_topic or active_topic or essay_match):
+        if raw_words >= MIN_WORD_COUNT and (replied_has_topic or is_bot_topic or active_topic or essay_match):
             clean_text = HASHTAG_PATTERN.sub("", text)
             clean_text = TOPIC_HASHTAG_PATTERN.sub("", clean_text).strip()
             word_count = count_words(clean_text)
+
+            if word_count > MAX_WORD_COUNT:
+                await message.reply(
+                    f"⚠️ Insho hajmi juda katta ({word_count} ta so'z). IELTS Task 2 inshosi {MAX_WORD_COUNT} ta so'zdan oshmasligi lozim.",
+                    reply_to_message_id=message.message_id,
+                )
+                return
+
             task_type = "Task 2"
 
             # Savol matnini reply qilingan xabardan ajratib olish
@@ -1171,8 +1219,10 @@ async def handle_general_text_message(message: types.Message):
                 task_prompt = active_topic.topic_text
                 logger.info(f"Attached group active topic to standalone essay: {task_prompt[:40]}...")
 
-        # Guruhda insho bo'lmagan oddiy suhbatlarga jim turamiz
+        # Guruhda insho bo'lmagan oddiy suhbatlarga jim turamiz, lekin insho juda katta bo'lsa ogohlantiramiz
         if not is_private and not is_valid:
+            if essay_match and "juda katta" in (reject_reason or ""):
+                await message.reply(f"⚠️ {reject_reason}", reply_to_message_id=message.message_id)
             return
 
         # Shaxsiy chatda hashtag bo'lmasa FSM menyusini chiqaramiz
@@ -1191,8 +1241,24 @@ async def handle_general_text_message(message: types.Message):
         if active_topic:
             task_prompt = active_topic.topic_text
 
-    # Limit tekshiruvi (Admin 7326292681 uchun cheksiz)
     user_id = user.id if user else 0
+
+    # Anti-Spam / In-Flight lock check:
+    if await queue_service.is_user_inflight(user_id):
+        user_mention = (
+            f"@{user.username}"
+            if (user and user.username)
+            else (html.escape(user.full_name) if user else "Foydalanuvchi")
+        )
+        await message.reply(
+            f"⏳ <b>{user_mention}, inshoingiz hozir tekshirilmoqda!</b>\n\n"
+            "Iltimos, avvalgi insho tahlili yakunlanishini kuting va shundan so'ng yangisini yuboring.",
+            reply_to_message_id=message.message_id,
+            parse_mode="HTML",
+        )
+        return
+
+    # Limit tekshiruvi (Admin 7326292681 uchun cheksiz)
     is_allowed, limit_msg = await check_and_increment_limits(
         user_id=user_id, chat_id=chat.id, is_private=is_private
     )
@@ -1203,7 +1269,7 @@ async def handle_general_text_message(message: types.Message):
     user_mention = (
         f"@{user.username}"
         if (user and user.username)
-        else (user.full_name if user else "Foydalanuvchi")
+        else (html.escape(user.full_name) if user else "Foydalanuvchi")
     )
 
     payload = {
@@ -1218,11 +1284,12 @@ async def handle_general_text_message(message: types.Message):
         "task_prompt": task_prompt,
     }
 
+    await queue_service.set_user_inflight(user_id, ttl=45)
     queue_pos = await queue_service.enqueue(payload)
 
     if task_prompt:
         prompt_snippet = task_prompt[:45] + "..." if len(task_prompt) > 45 else task_prompt
-        prompt_line = f"\n📌 <i>Mavzu: \"{prompt_snippet}\"</i>"
+        prompt_line = f"\n📌 <i>Mavzu: \"{html.escape(prompt_snippet)}\"</i>"
     else:
         prompt_line = "\n💡 <i>Maslahat: Savolga Reply qilib yuborsangiz, Task Response 100% aniq baholanadi.</i>"
 

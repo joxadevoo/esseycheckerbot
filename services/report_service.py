@@ -1,3 +1,4 @@
+import html
 import io
 import json
 import logging
@@ -162,23 +163,24 @@ def calculate_group_report_data(
 
 def format_report_text(data: Dict[str, Any]) -> str:
     """Formats aggregated report statistics into a clean, modern Telegram HTML message."""
-    topic_text = data["topic_text"]
+    topic_text = data.get("topic_text", "")
     if len(topic_text) > 100:
         topic_preview = topic_text[:97] + "..."
     else:
         topic_preview = topic_text
 
-    submitted = data["submitted_count"]
-    total = data["total_members"]
+    submitted = data.get("submitted_count", 0)
+    total = data.get("total_members", 0)
+    not_submitted = data.get("not_submitted_count", max(0, total - submitted))
     pct = round((submitted / total) * 100, 1) if total > 0 else 0
 
     lines = [
         "📊 <b>IELTS Task 2: Guruh Natijalari Hisoboti</b>\n",
-        f"📌 <b>Mavzu:</b> <i>\"{topic_preview}\"</i>\n",
+        f"📌 <b>Mavzu:</b> <i>\"{html.escape(topic_preview)}\"</i>\n",
         "📈 <b>Umumiy ko'rsatkichlar:</b>",
         f"• 👥 Guruh a'zolari: <b>{total} ta</b>",
         f"• ✍️ Insho topshirganlar: <b>{submitted} ta</b> ({pct}%)",
-        f"• ⏳ Hali topshirmaganlar: <b>{data['not_submitted_count']} ta</b>",
+        f"• ⏳ Hali topshirmaganlar: <b>{not_submitted} ta</b>",
     ]
 
     if submitted > 0:
@@ -198,7 +200,7 @@ def format_report_text(data: Dict[str, Any]) -> str:
             else:
                 delta_indicator = "🆕 (Ilk insho)"
 
-            mention = f"@{s['username']}" if s["username"] else s["full_name"]
+            mention = f"@{s['username']}" if s["username"] else html.escape(s["full_name"])
             line = (
                 f"{s['medal']} <b>{mention}</b> — <b>{s['overall']}</b> {delta_indicator}\n"
                 f"   └ <i>TR: {s['tr']} | CC: {s['cc']} | LR: {s['lr']} | GRA: {s['gra']} ({s['word_count']} so'z)</i>"
@@ -211,7 +213,7 @@ def format_report_text(data: Dict[str, Any]) -> str:
     not_submitted = data.get("not_submitted_users", [])
     if not_submitted and len(not_submitted) <= 10:
         mentions = [
-            f"@{u.username}" if u.username else u.full_name
+            f"@{u.username}" if u.username else html.escape(u.full_name)
             for u in not_submitted[:10]
         ]
         lines.append(f"\n⏳ <b>Topshirmagan o'quvchilar:</b> {', '.join(mentions)}")
