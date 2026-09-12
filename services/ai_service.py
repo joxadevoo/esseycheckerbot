@@ -294,6 +294,43 @@ FINAL QUALITY RULES
 
 """
 
+def calculate_ielts_overall(tr: float, cc: float, lr: float, gra: float) -> float:
+    """
+    Computes IELTS Overall Band strictly adhering to official British Council / IDP rules:
+    - Sum of 4 criteria divided by 4
+    - Ending in .125 rounds down to .0
+    - Ending in .25 rounds UP to .5
+    - Ending in .375 rounds UP to .5
+    - Ending in .5 stays .5
+    - Ending in .625 rounds down to .5
+    - Ending in .75 rounds UP to next whole band (1.0)
+    - Ending in .875 rounds UP to next whole band (1.0)
+    """
+    avg = (tr + cc + lr + gra) / 4.0
+    base = int(avg)
+    fraction = avg - base
+    if fraction < 0.25:
+        overall = float(base)
+    elif fraction < 0.75:
+        overall = float(base) + 0.5
+    else:
+        overall = float(base) + 1.0
+    return max(0.0, min(9.0, overall))
+
+
+def clean_json_string(text: str) -> str:
+    """Strips markdown code blocks (```json ... ```) and extra whitespace."""
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    return text
+
+
 class AIService:
     def __init__(self):
         self.provider = settings.AI_PROVIDER.lower()
@@ -380,15 +417,48 @@ class AIService:
                     )
 
                 content = response.choices[0].message.content
-                data = json.loads(content)
+                cleaned_content = clean_json_string(content)
+                data = json.loads(cleaned_content)
 
                 # Authoritative word count & rules enforcement in Python
                 data["word_count"] = word_count
                 data["meets_minimum"] = (word_count >= 250)
+
+                descriptors = data.get("scores_by_official_descriptors", {})
+
+                def _get_band(primary_k: str, fallback_ks: list) -> Optional[float]:
+                    for k in [primary_k] + fallback_ks:
+                        val = descriptors.get(k) or data.get(k)
+                        if isinstance(val, dict) and "band" in val:
+                            val = val.get("band")
+                        if val is not None:
+                            try:
+                                return float(val)
+                            except (ValueError, TypeError):
+                                pass
+                    return None
+
+                tr_b = _get_band("task_response", ["task_achievement", "tr"])
+                cc_b = _get_band("coherence_cohesion", ["coherence", "cc"])
+                lr_b = _get_band("lexical_resource", ["lexical", "lr"])
+                gr_b = _get_band("grammatical_accuracy", ["grammar", "gra", "grammatical_range_and_accuracy"])
+
+                # Enforce under-length penalty (<250 words -> TR cap 5.5)
                 if word_count < 250:
-                    tr = data.get("scores_by_official_descriptors", {}).get("task_response")
-                    if isinstance(tr, dict) and isinstance(tr.get("band"), (int, float)) and tr["band"] > 5.5:
-                        tr["band"] = 5.5
+                    if tr_b is not None and tr_b > 5.5:
+                        tr_b = 5.5
+                        if "task_response" in descriptors and isinstance(descriptors["task_response"], dict):
+                            descriptors["task_response"]["band"] = 5.5
+                        elif "tr" in data and isinstance(data["tr"], dict):
+                            data["tr"]["band"] = 5.5
+
+                # Authoritatively compute official IELTS Overall Band in Python
+                if tr_b is not None and cc_b is not None and lr_b is not None and gr_b is not None:
+                    official_overall = calculate_ielts_overall(tr_b, cc_b, lr_b, gr_b)
+                    data["current_overall_band"] = official_overall
+                    data["overall"] = official_overall
+                    data["overall_band"] = official_overall
+                    data["next_target_band"] = min(9.0, official_overall + 0.5)
 
                 data["_model"] = model_name
                 data["_provider"] = self.provider
