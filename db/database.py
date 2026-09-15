@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from sqlalchemy import select, and_, func
 
 from config import settings
-from db.models import Base, User, Group, Essay, DailyUsage, GroupTopic, GroupMemberRole
+from db.models import Base, User, Group, GroupMember, Essay, DailyUsage, GroupTopic, GroupMemberRole
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,31 @@ async def upsert_group(chat_id: int, title: Optional[str]):
             session.add(group)
         else:
             group.title = title
+        await session.commit()
+
+
+async def upsert_group_member(
+    chat_id: int,
+    user_id: int,
+    username: Optional[str] = None,
+    full_name: Optional[str] = None,
+):
+    """
+    Registers a user as a member of chat_id and updates their activity timestamp.
+    Also ensures User record is up to date (handles users with or without username).
+    """
+    await upsert_user(user_id, username, full_name or "")
+    async with get_session() as session:
+        stmt = select(GroupMember).where(
+            and_(GroupMember.chat_id == chat_id, GroupMember.user_id == user_id)
+        )
+        res = await session.execute(stmt)
+        member = res.scalar_one_or_none()
+        if member:
+            member.last_seen = func.now()
+        else:
+            member = GroupMember(chat_id=chat_id, user_id=user_id)
+            session.add(member)
         await session.commit()
 
 
@@ -364,13 +389,18 @@ async def get_student_historical_scores(chat_id: int, user_id: int) -> list[floa
 
 
 async def get_group_tracked_users(chat_id: int) -> list[User]:
-    """Returns all users who have ever submitted an essay in this group."""
+    """
+    Returns all users tracked in this group (either recorded as group members
+    or who submitted essays in this group). Handles users with or without username.
+    """
+    from sqlalchemy import or_
     async with get_session() as session:
+        member_subq = select(GroupMember.user_id).where(GroupMember.chat_id == chat_id)
+        essay_subq = select(Essay.user_id).where(Essay.chat_id == chat_id)
         stmt = (
             select(User)
-            .join(Essay, Essay.user_id == User.id)
-            .where(Essay.chat_id == chat_id)
-            .distinct()
+            .where(or_(User.id.in_(member_subq), User.id.in_(essay_subq)))
+            .order_by(User.full_name.asc())
         )
         res = await session.execute(stmt)
         return list(res.scalars().all())

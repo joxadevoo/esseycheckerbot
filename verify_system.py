@@ -33,8 +33,9 @@ from db.database import (
     get_student_historical_scores,
     get_group_tracked_users,
     get_user_teacher_groups,
+    upsert_group_member,
 )
-from db.models import User, Group, GroupTopic, GroupMemberRole, Essay
+from db.models import User, Group, GroupTopic, GroupMemberRole, GroupMember, Essay
 from services.report_service import (
     calculate_group_report_data,
     format_report_text,
@@ -259,7 +260,7 @@ async def run_tests():
     # 6. Teacher Report & Analytics Service
     print("\n--- 6. Testing Teacher Report, Visual Chart & Excel Export ---")
     import json
-    from datetime import datetime, timezone
+    from datetime import datetime, timezone, timedelta
 
     # Setup active topic
     rep_topic = await set_group_topic(test_chat_id, "Should universities focus on practical employment skills?", message_id=500, created_by=admin_user_id)
@@ -294,8 +295,9 @@ async def run_tests():
 
     async with get_session() as session:
         # Prior essays (from 7 days ago)
-        past_time = datetime(2026, 9, 1, 10, 0, 0)
-        now_time = datetime(2026, 9, 10, 12, 0, 0)
+        base_topic_time = rep_topic.created_at or datetime.now()
+        now_time = base_topic_time + timedelta(minutes=1)
+        past_time = base_topic_time - timedelta(days=7)
 
         e_old = Essay(
             user_id=student_1_id,
@@ -360,9 +362,17 @@ async def run_tests():
     for es, _ in submissions:
         hist_map[es.user_id] = await get_student_historical_scores(test_chat_id, es.user_id)
 
+    # Register a student WITHOUT username who has NEVER submitted an essay yet
+    student_no_username_id = 999111
+    await upsert_group_member(
+        test_chat_id, student_no_username_id, username=None, full_name="Ali Valiyev"
+    )
+
     # Tracked users
     tracked_users = await get_group_tracked_users(test_chat_id)
     assert any(u.id == student_3_id for u in tracked_users)
+    assert any(u.id == student_no_username_id for u in tracked_users)
+    print("✅ Tracked users successfully identified member WITHOUT username who never submitted an essay")
 
     # Calculate report data
     report_data = calculate_group_report_data(
@@ -409,7 +419,9 @@ async def run_tests():
     assert "TR: 7.5 | CC: 7.5 | LR: 8.0 | GRA: 7.0" in text_report
     assert "📈 (+0.5)" in text_report
     assert "@student_three" in text_report  # in not_submitted list
-    print("✅ Formatted Telegram HTML text report verified")
+    assert "Ali Valiyev" in text_report  # student without username in not_submitted list
+    assert f"tg://user?id={student_no_username_id}" in text_report
+    print("✅ Formatted Telegram HTML text report verified (including students without username)")
 
     # Test get_user_teacher_groups query
     t_groups = await get_user_teacher_groups("deputy_admin")

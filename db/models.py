@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     Date,
     func,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import declarative_base
 
@@ -34,6 +35,20 @@ class Group(Base):
     created_at = Column(DateTime, default=func.now())
 
 
+class GroupMember(Base):
+    __tablename__ = "group_members"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    chat_id = Column(BigInteger, index=True, nullable=False)
+    user_id = Column(BigInteger, index=True, nullable=False)
+    joined_at = Column(DateTime, default=func.now())
+    last_seen = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("chat_id", "user_id", name="uq_group_member"),
+    )
+
+
 class GroupTopic(Base):
     __tablename__ = "group_topics"
 
@@ -55,7 +70,6 @@ class GroupMemberRole(Base):
     role = Column(String(32), default="teacher", nullable=False)  # 'teacher' or 'admin'
     assigned_by = Column(BigInteger, nullable=True)
     created_at = Column(DateTime, default=func.now())
-
 
 
 class Essay(Base):

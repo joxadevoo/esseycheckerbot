@@ -200,7 +200,11 @@ def format_report_text(data: Dict[str, Any]) -> str:
             else:
                 delta_indicator = "🆕 (Ilk insho)"
 
-            mention = f"@{s['username']}" if s["username"] else html.escape(s["full_name"])
+            mention = (
+                f"@{s['username']}"
+                if s["username"]
+                else f'<a href="tg://user?id={s["user_id"]}">{html.escape(s["full_name"])}</a>'
+            )
             line = (
                 f"{s['medal']} <b>{mention}</b> — <b>{s['overall']}</b> {delta_indicator}\n"
                 f"   └ <i>TR: {s['tr']} | CC: {s['cc']} | LR: {s['lr']} | GRA: {s['gra']} ({s['word_count']} so'z)</i>"
@@ -209,14 +213,26 @@ def format_report_text(data: Dict[str, Any]) -> str:
     else:
         lines.append("\nℹ️ <i>Ushbu mavzu bo'yicha hali birorta insho topshirilmagan.</i>")
 
-    # If there are tracked users who haven't submitted
+    # Topshirmagan guruh a'zolari
     not_submitted = data.get("not_submitted_users", [])
-    if not_submitted and len(not_submitted) <= 10:
-        mentions = [
-            f"@{u.username}" if u.username else html.escape(u.full_name)
-            for u in not_submitted[:10]
-        ]
-        lines.append(f"\n⏳ <b>Topshirmagan o'quvchilar:</b> {', '.join(mentions)}")
+    if not_submitted:
+        display_limit = 15
+        mentions = []
+        for u in not_submitted[:display_limit]:
+            name = html.escape(u.full_name if u.full_name else f"Foydalanuvchi #{u.id}")
+            if u.username:
+                mentions.append(f"@{u.username}")
+            else:
+                mentions.append(f'<a href="tg://user?id={u.id}">{name}</a>')
+        more_text = (
+            f" <i>(va yana {len(not_submitted) - display_limit} nafar)</i>"
+            if len(not_submitted) > display_limit
+            else ""
+        )
+        lines.append(
+            f"\n⏳ <b>Topshirmagan o'quvchilar ({len(not_submitted)} ta):</b>\n"
+            f"{', '.join(mentions)}{more_text}"
+        )
 
     lines.append("\n📁 <i>Batafsil ma'lumotlar ilova qilingan grafik rasm va Excel jadvalida keltirilgan.</i>")
     return "\n".join(lines)
@@ -442,6 +458,43 @@ def generate_report_excel(data: Dict[str, Any]) -> bytes:
         worksheet.write_formula(row_idx, 8, f'=IFERROR(ROUND(AVERAGE(I6:I{row_idx}), 1), "-")', summary_score_fmt, value=avg_gra)
         worksheet.write_formula(row_idx, 9, f'=IFERROR(ROUND(AVERAGE(J6:J{row_idx}), 1), "-")', summary_score_fmt, value=avg_ovr)
         worksheet.write(row_idx, 10, "", summary_fmt)
+
+    # Unsubmitted members table in Excel
+    not_submitted_users = data.get("not_submitted_users", [])
+    if not_submitted_users:
+        row_idx += 3
+        section_title_fmt = workbook.add_format({
+            "bold": True,
+            "font_size": 11,
+            "font_color": "#991b1b",
+            "bg_color": "#fee2e2",
+            "border": 1,
+            "align": "left",
+        })
+        worksheet.merge_range(row_idx, 0, row_idx, 4, f"⏳ Hali topshirmagan o'quvchilar ({len(not_submitted_users)} ta)", section_title_fmt)
+        row_idx += 1
+
+        ns_header_fmt = workbook.add_format({
+            "bold": True,
+            "bg_color": "#fecaca",
+            "border": 1,
+            "align": "center",
+        })
+        worksheet.write(row_idx, 0, "№", ns_header_fmt)
+        worksheet.write(row_idx, 1, "O'quvchi", ns_header_fmt)
+        worksheet.write(row_idx, 2, "Telegram Username / ID", ns_header_fmt)
+        worksheet.write(row_idx, 3, "Holati", ns_header_fmt)
+        worksheet.write(row_idx, 4, "Izoh", ns_header_fmt)
+        row_idx += 1
+
+        for n_idx, u in enumerate(not_submitted_users):
+            worksheet.write(row_idx, 0, n_idx + 1, cell_center)
+            worksheet.write(row_idx, 1, u.full_name or f"Foydalanuvchi #{u.id}", cell_left)
+            tg_info = f"@{u.username}" if u.username else f"ID: {u.id}"
+            worksheet.write(row_idx, 2, tg_info, cell_left)
+            worksheet.write(row_idx, 3, "Topshirmagan", cell_center)
+            worksheet.write(row_idx, 4, "Insho topshirilishi kutilmoqda", cell_left)
+            row_idx += 1
 
     # Column widths
     col_widths = [5, 24, 18, 18, 10, 8, 8, 8, 8, 14, 18]

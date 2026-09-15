@@ -13,6 +13,7 @@ from config import settings
 from db.database import (
     upsert_user,
     upsert_group,
+    upsert_group_member,
     check_and_increment_limits,
     get_session,
     get_group_topic,
@@ -1098,6 +1099,8 @@ async def handle_general_text_message(message: types.Message):
         await upsert_user(user.id, user.username, user.full_name)
     if not is_private:
         await upsert_group(chat.id, chat.title)
+        if user:
+            await upsert_group_member(chat.id, user.id, user.username, user.full_name)
 
     essay_match = HASHTAG_PATTERN.search(text)
     topic_match = TOPIC_HASHTAG_PATTERN.search(text)
@@ -1299,3 +1302,49 @@ async def handle_general_text_message(message: types.Message):
         f"<i>AI Examiner tahlil qilmoqda, natija tayyor bo'lishi bilan xabar beramiz...</i>"
     )
     await message.reply(ack_text, parse_mode="HTML")
+
+
+# ----------------------------------------------------
+# Guruh A'zolari va Qo'shilish Hodisalari Handlerlari
+# ----------------------------------------------------
+
+@router.message(F.new_chat_members)
+async def handle_new_chat_members(message: types.Message):
+    """Foydalanuvchi guruhga yangi qo'shilganda uni bazaga yozib oladi."""
+    chat = message.chat
+    await upsert_group(chat.id, chat.title)
+    if message.new_chat_members:
+        for new_user in message.new_chat_members:
+            if not new_user.is_bot:
+                await upsert_group_member(
+                    chat.id, new_user.id, new_user.username, new_user.full_name
+                )
+
+
+@router.chat_member()
+async def handle_chat_member_update(event: types.ChatMemberUpdated):
+    """Guruhdagi a'zolar holati o'zgarganda (qo'shilish, faollashish) a'zoni saqlaydi."""
+    user = event.new_chat_member.user
+    if user and not user.is_bot:
+        if event.new_chat_member.status in ["member", "administrator", "creator", "restricted"]:
+            await upsert_group_member(
+                event.chat.id, user.id, user.username, user.full_name
+            )
+
+
+@router.my_chat_member()
+async def handle_my_chat_member_update(event: types.ChatMemberUpdated):
+    """Bot guruhga qo'shilganda yoki admin qilinganda guruhni va mavjud adminlarni ro'yxatga oladi."""
+    chat = event.chat
+    await upsert_group(chat.id, chat.title)
+    if event.new_chat_member.status in ["administrator", "member"]:
+        try:
+            admins = await event.bot.get_chat_administrators(chat.id)
+            for adm in admins:
+                if not adm.user.is_bot:
+                    await upsert_group_member(
+                        chat.id, adm.user.id, adm.user.username, adm.user.full_name
+                    )
+        except Exception:
+            pass
+
