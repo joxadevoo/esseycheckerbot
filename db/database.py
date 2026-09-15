@@ -17,6 +17,7 @@ if "sqlite" in settings.DATABASE_URL:
 else:
     engine_kwargs["pool_size"] = 10
     engine_kwargs["max_overflow"] = 20
+    engine_kwargs["connect_args"] = {"statement_cache_size": 0}
 
 engine = create_async_engine(settings.DATABASE_URL, **engine_kwargs)
 async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
