@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from sqlalchemy import select, and_, func
 
 from config import settings
-from db.models import Base, User, Group, GroupMember, Essay, DailyUsage, GroupTopic, GroupMemberRole
+from db.models import Base, User, Group, GroupMember, Essay, DailyUsage, GroupTopic, GroupMemberRole, Referral
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +17,8 @@ if "sqlite" in settings.DATABASE_URL:
 else:
     engine_kwargs["pool_size"] = 10
     engine_kwargs["max_overflow"] = 20
+    engine_kwargs["pool_pre_ping"] = True
+    engine_kwargs["pool_recycle"] = 300
     engine_kwargs["connect_args"] = {"statement_cache_size": 0}
 
 engine = create_async_engine(settings.DATABASE_URL, **engine_kwargs)
@@ -24,9 +26,23 @@ async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncS
 
 
 async def init_db():
-    """Create tables if they do not exist."""
+    """Create tables if they do not exist and ensure columns exist."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        try:
+            from sqlalchemy import text
+            if "sqlite" in settings.DATABASE_URL:
+                res = await conn.execute(text("PRAGMA table_info(users);"))
+                cols = [r[1] for r in res.fetchall()]
+                if "extra_credits" not in cols:
+                    await conn.execute(text("ALTER TABLE users ADD COLUMN extra_credits INTEGER DEFAULT 0 NOT NULL;"))
+                if "referral_count" not in cols:
+                    await conn.execute(text("ALTER TABLE users ADD COLUMN referral_count INTEGER DEFAULT 0 NOT NULL;"))
+            else:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS extra_credits INTEGER DEFAULT 0 NOT NULL;"))
+                await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_count INTEGER DEFAULT 0 NOT NULL;"))
+        except Exception as ex:
+            logger.warning(f"Database migration notice: {ex}")
     logger.info("Database initialized successfully.")
 
 
@@ -89,11 +105,115 @@ async def upsert_group_member(
         await session.commit()
 
 
+async def add_user_credits(user_id: int, count: int) -> int:
+    """Adds purchased essay credits to user's balance and returns the new total."""
+    async with get_session() as session:
+        user = await session.get(User, user_id)
+        if not user:
+            user = User(id=user_id, extra_credits=count)
+            session.add(user)
+        else:
+            user.extra_credits = (user.extra_credits or 0) + count
+        await session.commit()
+        return user.extra_credits
+
+
+async def get_user_credits(user_id: int) -> int:
+    """Returns the current extra credits balance for a user."""
+    async with get_session() as session:
+        user = await session.get(User, user_id)
+        return user.extra_credits if user and user.extra_credits else 0
+
+
+async def get_user_daily_usage(user_id: int) -> int:
+    """Returns today's used count for a user."""
+    today = date.today()
+    async with get_session() as session:
+        stmt = select(DailyUsage).where(
+            and_(
+                DailyUsage.target_type == "user",
+                DailyUsage.target_id == user_id,
+                DailyUsage.usage_date == today,
+            )
+        )
+        res = await session.execute(stmt)
+        record = res.scalar_one_or_none()
+        return record.count if record else 0
+
+
+async def process_referral(
+    referrer_id: int, new_user_id: int, new_user_name: str
+) -> Tuple[bool, str, int]:
+    """
+    Processes referral attribution when a new user joins via a referral link.
+    Awards +1 bonus credit to referrer and +1 to new user.
+    Returns (success: bool, message: str, referrer_credits: int).
+    """
+    if referrer_id == new_user_id:
+        return False, "O'z-o'zingizni taklif qila olmaysiz.", 0
+
+    async with get_session() as session:
+        # Check if new_user_id already has a referral record
+        stmt = select(Referral).where(Referral.referred_id == new_user_id)
+        existing_ref = (await session.execute(stmt)).scalar_one_or_none()
+        if existing_ref:
+            return False, "Ushbu foydalanuvchi allaqachon referal orqali qo'shilgan.", 0
+
+        # Check if new_user_id is an old user who has already submitted essays
+        stmt_essays = select(func.count(Essay.id)).where(Essay.user_id == new_user_id)
+        essay_count = (await session.execute(stmt_essays)).scalar() or 0
+        if essay_count > 0:
+            return False, "Ushbu foydalanuvchi yangi emas (avval insho topshirgan).", 0
+
+        # Record referral
+        ref_record = Referral(
+            referrer_id=referrer_id,
+            referred_id=new_user_id,
+            reward_given=True,
+        )
+        session.add(ref_record)
+
+        # Update referrer stats and extra_credits (+1)
+        referrer = await session.get(User, referrer_id)
+        if referrer:
+            referrer.referral_count = (referrer.referral_count or 0) + 1
+            referrer.extra_credits = (referrer.extra_credits or 0) + 1
+            referrer_credits = referrer.extra_credits
+        else:
+            referrer = User(id=referrer_id, extra_credits=1, referral_count=1)
+            session.add(referrer)
+            referrer_credits = 1
+
+        # Update new user extra_credits (+1 welcome bonus)
+        new_user = await session.get(User, new_user_id)
+        if new_user:
+            new_user.extra_credits = (new_user.extra_credits or 0) + 1
+        else:
+            new_user = User(id=new_user_id, full_name=new_user_name, extra_credits=1)
+            session.add(new_user)
+
+        await session.commit()
+        logger.info(f"Referral SUCCESS: referrer {referrer_id} referred {new_user_id}. Both awarded +1 credit.")
+        return True, "Referal muvaffaqiyatli qabul qilindi!", referrer_credits
+
+
+async def get_user_referral_stats(user_id: int) -> dict:
+    """Returns referral count and total referrals for a user."""
+    async with get_session() as session:
+        user = await session.get(User, user_id)
+        count = user.referral_count if user and user.referral_count else 0
+        return {
+            "referral_count": count,
+            "bonus_credits_earned": count,
+        }
+
+
+
 async def check_and_increment_limits(
     user_id: int, chat_id: int, is_private: bool
 ) -> Tuple[bool, str]:
     """
-    Checks user and group daily limits. If within limit, increments usage count.
+    Checks user and group daily limits. If daily limit reached, checks extra_credits.
     Admin users have unlimited access.
     Returns (is_allowed: bool, reason: str).
     """
@@ -117,11 +237,22 @@ async def check_and_increment_limits(
         user_usage = result_user.scalar_one_or_none()
         current_user_count = user_usage.count if user_usage else 0
 
+        used_extra_credit = False
         if current_user_count >= settings.DAILY_USER_LIMIT:
-            return (
-                False,
-                f"Sizning kunlik limitingiz ({settings.DAILY_USER_LIMIT} ta) tugadi. Ertaga yana davom etishingiz mumkin!",
-            )
+            # Check if user has extra credits purchased via Telegram Stars
+            user = await session.get(User, user_id)
+            if user and user.extra_credits > 0:
+                user.extra_credits -= 1
+                used_extra_credit = True
+                logger.info(f"User {user_id} used 1 extra credit. Remaining: {user.extra_credits}")
+            else:
+                return (
+                    False,
+                    f"Sizning bugungi bepul limitingiz ({settings.DAILY_USER_LIMIT} ta) tugadi.\n\n"
+                    f"Tekshirishni davom ettirish uchun o'zingizga ma'qul yo'lni tanlang:\n"
+                    f"⭐️ <b>Sotib olish:</b> Telegram Yulduzlari (Stars) orqali qo'shimcha insholar xarid qiling\n"
+                    f"🎁 <b>Do'st taklif qilish:</b> Do'stlaringizni taklif qiling va har bir do'stingiz uchun <b>+1 ta bepul insho</b> oling!",
+                )
 
         # 2. If in a group, check group limit
         if not is_private:
@@ -159,14 +290,15 @@ async def check_and_increment_limits(
             else:
                 group_usage.count += 1
 
-        # Increment user usage
-        if not user_usage:
-            user_usage = DailyUsage(
-                target_type="user", target_id=user_id, usage_date=today, count=1
-            )
-            session.add(user_usage)
-        else:
-            user_usage.count += 1
+        # Increment user daily usage (if not using extra credits)
+        if not used_extra_credit:
+            if not user_usage:
+                user_usage = DailyUsage(
+                    target_type="user", target_id=user_id, usage_date=today, count=1
+                )
+                session.add(user_usage)
+            else:
+                user_usage.count += 1
 
         await session.commit()
         return True, "OK"

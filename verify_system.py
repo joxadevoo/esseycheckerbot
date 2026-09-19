@@ -34,8 +34,12 @@ from db.database import (
     get_group_tracked_users,
     get_user_teacher_groups,
     upsert_group_member,
+    add_user_credits,
+    get_user_credits,
+    process_referral,
+    get_user_referral_stats,
 )
-from db.models import User, Group, GroupTopic, GroupMemberRole, GroupMember, Essay
+from db.models import User, Group, GroupTopic, GroupMemberRole, GroupMember, Essay, DailyUsage, Referral
 from services.report_service import (
     calculate_group_report_data,
     format_report_text,
@@ -187,6 +191,83 @@ async def run_tests():
     allowed, msg = await check_and_increment_limits(test_user_id, test_chat_id, is_private=False)
     assert allowed, f"Limit check failed: {msg}"
     print("✅ Regular database user, group, and daily limits verified")
+
+    # Test Extra Credits & Telegram Stars payment balance functionality
+    from handlers.payments import STARS_PACKAGES
+    from datetime import date
+    from config import settings
+
+    assert "pkg_3" in STARS_PACKAGES and STARS_PACKAGES["pkg_3"]["stars"] == 15
+    assert "pkg_10" in STARS_PACKAGES and STARS_PACKAGES["pkg_10"]["stars"] == 35
+    assert "pkg_30" in STARS_PACKAGES and STARS_PACKAGES["pkg_30"]["stars"] == 75
+    print("✅ Telegram Stars packages (15, 35, 75 Stars) verified")
+
+    from sqlalchemy import delete
+    from db.models import DailyUsage, User, Referral
+    async with get_session() as session:
+        await session.execute(delete(DailyUsage).where(DailyUsage.target_id.in_([test_user_id, 888777666, 777111222, 777333444])))
+        await session.execute(delete(Referral).where(Referral.referred_id.in_([777333444])))
+        await session.execute(delete(User).where(User.id.in_([888777666, 777111222, 777333444])))
+        await session.commit()
+
+    test_buyer_id = 888777666
+    await upsert_user(test_buyer_id, "buyer_user", "Buyer User")
+    initial_credits = await get_user_credits(test_buyer_id)
+    assert initial_credits == 0
+
+    new_credits = await add_user_credits(test_buyer_id, count=10)
+    assert new_credits == 10
+    assert await get_user_credits(test_buyer_id) == 10
+    print("✅ add_user_credits & get_user_credits verified (10 credits added)")
+
+    # Test limit bypass via extra_credits when daily limit is exhausted
+    async with get_session() as session:
+        d_fake = DailyUsage(
+            target_type="user",
+            target_id=test_buyer_id,
+            usage_date=date.today(),
+            count=settings.DAILY_USER_LIMIT,
+        )
+        session.add(d_fake)
+        await session.commit()
+
+    # User has 10 extra credits, so limit check should succeed by deducting 1 extra credit
+    allowed, msg = await check_and_increment_limits(test_buyer_id, test_chat_id, is_private=True)
+    assert allowed, f"Should allow with extra credits, but got: {msg}"
+    assert await get_user_credits(test_buyer_id) == 9, "One credit should have been deducted"
+    print("✅ Extra credit deduction upon daily limit exhaustion verified (remaining balance: 9)")
+
+    # 4.5. Test Referral System Functionality
+    print("\n--- 4.5. Testing Referral System ---")
+    ref_host_id = 777111222
+    ref_guest_id = 777333444
+
+    await upsert_user(ref_host_id, "ref_host", "Referral Host")
+    await upsert_user(ref_guest_id, "ref_guest", "Referral Guest")
+
+    # A. Test self-referral rejection
+    s_self, _, _ = await process_referral(ref_host_id, ref_host_id, "Host")
+    assert not s_self, "Self-referral must be rejected"
+    print("✅ Self-referral rejection verified")
+
+    # B. Test valid referral (+1 to host, +1 to guest)
+    s_valid, msg, host_credits = await process_referral(ref_host_id, ref_guest_id, "Guest")
+    assert s_valid, f"Referral failed: {msg}"
+    assert host_credits == 1
+    assert await get_user_credits(ref_host_id) == 1
+    assert await get_user_credits(ref_guest_id) == 1
+    print("✅ Valid referral verified (+1 credit to both host and guest)")
+
+    # C. Test duplicate referral rejection
+    s_dup, _, _ = await process_referral(test_buyer_id, ref_guest_id, "Guest")
+    assert not s_dup, "Duplicate referral for same guest must be rejected"
+    print("✅ Duplicate referral rejection verified")
+
+    # D. Test referral stats
+    ref_stats = await get_user_referral_stats(ref_host_id)
+    assert ref_stats["referral_count"] == 1
+    assert ref_stats["bonus_credits_earned"] == 1
+    print("✅ Referral statistics query verified (1 friend referred)")
 
     # Test GroupTopic functionality
     topic = await set_group_topic(test_chat_id, "Sample IELTS Topic Question", message_id=123, created_by=admin_user_id)

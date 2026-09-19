@@ -107,6 +107,10 @@ def get_start_keyboard(is_teacher: bool = False) -> InlineKeyboardMarkup:
             )
         ])
     buttons.append([
+        InlineKeyboardButton(text="🎁 Do'stlarni taklif qilish", callback_data="ref:menu"),
+        InlineKeyboardButton(text="💎 Balans / Xarid", callback_data="buy:menu"),
+    ])
+    buttons.append([
         InlineKeyboardButton(text="ℹ️ Qoidalar va Yordam", callback_data="fsm:help"),
     ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -151,8 +155,48 @@ async def handle_start(message: types.Message, state: FSMContext):
     if user:
         await upsert_user(user.id, user.username, user.full_name)
 
-    # Deep linking check (e.g. /start report_12 or /start groupreport_-1001234)
+    # Deep linking check (e.g. /start ref_123, /start buy, /start referral, /start report_12 or /start groupreport_-1001234)
     parts = (message.text or "").split(maxsplit=1)
+    if len(parts) > 1 and parts[1] in ("buy", "balans", "xarid"):
+        from handlers.payments import handle_buy_or_balance_command
+        await handle_buy_or_balance_command(message)
+        return
+
+    if len(parts) > 1 and parts[1] in ("referral", "taklif", "ref"):
+        from handlers.referral import handle_referral_command
+        await handle_referral_command(message)
+        return
+
+    welcome_bonus_text = ""
+    if len(parts) > 1 and parts[1].startswith("ref_"):
+        ref_id_str = parts[1].replace("ref_", "")
+        if ref_id_str.isdigit():
+            referrer_id = int(ref_id_str)
+            from db.database import process_referral
+            success, msg, referrer_credits = await process_referral(
+                referrer_id=referrer_id,
+                new_user_id=user.id,
+                new_user_name=user.full_name or "Do'stingiz",
+            )
+            if success:
+                welcome_bonus_text = (
+                    "\n\n🎁 <b>Xush kelibsiz bonusi:</b> Do'stingiz taklifi bilan qo'shilganingiz uchun sizga <b>+1 ta bepul insho tekshiruvi</b> sovg'a qilindi!"
+                )
+                try:
+                    referrer_notify = (
+                        f"🎉 <b>Ajoyib yangilik!</b>\n\n"
+                        f"Siz taklif qilgan do'stingiz <b>{html.escape(user.full_name)}</b> botimizga qo'shildi!\n"
+                        f"Sizga <b>+1 ta bepul insho tekshiruvi</b> taqdim etildi.\n"
+                        f"💎 <b>Jami qo'shimcha insholar balansingiz:</b> {referrer_credits} ta"
+                    )
+                    await message.bot.send_message(
+                        chat_id=referrer_id,
+                        text=referrer_notify,
+                        parse_mode="HTML",
+                    )
+                except Exception as notify_err:
+                    logger.warning(f"Could not notify referrer {referrer_id}: {notify_err}")
+
     if len(parts) > 1 and parts[1].startswith("groupreport_"):
         gid_str = parts[1].replace("groupreport_", "")
         try:
@@ -221,6 +265,7 @@ async def handle_start(message: types.Message, state: FSMContext):
         f"🎯 <b>Imkoniyatlar:</b>\n"
         f"• <b>Shaxsiy chatda:</b> Pastdagi <b>«✍️ Yangi insho tekshirish»</b> tugmasini bosing — savol va inshoni bosqichma-bosqich yuboring.\n"
         f"• <b>Guruhda:</b> Ustoz <code>/new</code> yoki <code>#task2</code> bilan mavzu e'lon qiladi. O'quvchilar savolga <b>Reply</b> qilib yoki <code>#essay</code> bilan o'z insholarini yuborishadi!"
+        f"{welcome_bonus_text}"
     )
     if is_teacher:
         welcome_text += (
@@ -987,7 +1032,23 @@ async def handle_fsm_essay_text(message: types.Message, state: FSMContext):
         user_id=user_id, chat_id=chat.id, is_private=True
     )
     if not is_allowed:
-        await message.reply(f"🚫 {limit_msg}")
+        buy_kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="⭐️ Qo'shimcha insholar sotib olish",
+                        callback_data="buy:menu",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="🎁 Do'st taklif qilish (+1 bepul insho)",
+                        callback_data="ref:menu",
+                    )
+                ],
+            ]
+        )
+        await message.reply(f"🚫 {limit_msg}", parse_mode="HTML", reply_markup=buy_kb)
         return
 
     user_mention = (
@@ -1266,7 +1327,43 @@ async def handle_general_text_message(message: types.Message):
         user_id=user_id, chat_id=chat.id, is_private=is_private
     )
     if not is_allowed:
-        await message.reply(f"🚫 {limit_msg}")
+        bot_user = await message.bot.get_me()
+        b_username = bot_user.username or "esseycheckerbot"
+        if is_private:
+            limit_kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="⭐️ Qo'shimcha insholar sotib olish",
+                            callback_data="buy:menu",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="🎁 Do'st taklif qilish (+1 bepul insho)",
+                            callback_data="ref:menu",
+                        )
+                    ],
+                ]
+            )
+        else:
+            limit_kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="⭐️ Qo'shimcha insholar sotib olish",
+                            url=f"https://t.me/{b_username}?start=buy",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="🎁 Do'st taklif qilish (+1 bepul insho)",
+                            url=f"https://t.me/{b_username}?start=referral",
+                        )
+                    ],
+                ]
+            )
+        await message.reply(f"🚫 {limit_msg}", parse_mode="HTML", reply_markup=limit_kb)
         return
 
     user_mention = (

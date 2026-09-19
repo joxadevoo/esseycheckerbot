@@ -19,9 +19,12 @@ from aiogram.types import (
 )
 
 from aiohttp import web
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from config import settings
 from db.database import init_db
 from handlers.messages import router
+from handlers.payments import payments_router
+from handlers.referral import referral_router
 from services.worker import start_worker
 
 logging.basicConfig(
@@ -84,6 +87,9 @@ async def setup_bot_commands(bot: Bot):
         private_commands = [
             BotCommand(command="start", description="🚀 Botni ishga tushirish"),
             BotCommand(command="new", description="✍️ Yangi sessiya (savol va insho tekshirish)"),
+            BotCommand(command="referral", description="🎁 Do'stlarni taklif qilish va bonus insholar"),
+            BotCommand(command="balance", description="💎 Insholar balansi va Stars orqali xarid"),
+            BotCommand(command="buy", description="⭐️ Qo'shimcha insholar xarid qilish"),
             BotCommand(command="help", description="ℹ️ Yordam va IELTS mezonlari"),
         ]
         await bot.set_my_commands(private_commands, scope=BotCommandScopeAllPrivateChats())
@@ -93,13 +99,6 @@ async def setup_bot_commands(bot: Bot):
 
 
 async def main():
-    # 1. Start Healthcheck HTTP Server IMMEDIATELY so Render/Cloud port scan detects it
-    health_runner = None
-    try:
-        health_runner = await start_health_server(port=settings.PORT)
-    except Exception as e:
-        logger.warning(f"Could not start HTTP health server on port {settings.PORT}: {e}")
-
     env_name = settings.model_config.get("env_file", ".env")
     mode_name = "TEST / DEV" if "--test" in sys.argv else "PRODUCTION"
     logger.info(f"🚀 Bot ishga tushirilmoqda... Rejim: [{mode_name}] (Fayl: {env_name})")
@@ -109,15 +108,17 @@ async def main():
             f"DIQQAT: {env_name} faylida BOT_TOKEN ko'rsatilmadi! Iltimos, {env_name} faylini to'ldiring."
         )
 
-    # 2. Initialize Database tables
+    # 1. Initialize Database tables
     await init_db()
 
-    # 3. Setup Bot & Dispatcher
+    # 2. Setup Bot & Dispatcher
     bot = Bot(
         token=settings.BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher()
+    dp.include_router(payments_router)
+    dp.include_router(referral_router)
     dp.include_router(router)
 
     # Get bot user info
@@ -135,7 +136,7 @@ async def main():
             f"Telegram API ulanishida ogohlantirish (Token hali kiritilmagan bo'lishi mumkin): {e}"
         )
 
-    # 4. Start background AI Workers (default 3 concurrent workers)
+    # 3. Start background AI Workers (default 3 concurrent workers)
     NUM_WORKERS = 3
     worker_tasks = []
     for i in range(1, NUM_WORKERS + 1):
@@ -143,18 +144,58 @@ async def main():
         worker_tasks.append(task)
     logger.info(f"{NUM_WORKERS} ta mustaqil AI Worker orqa fonda ishga tushirildi.")
 
-    # 5. Start Bot Polling or Webhook
+    # 4. Start Bot in Webhook or Long-Polling Mode
+    webhook_runner = None
+    health_runner = None
     try:
         if settings.WEBHOOK_URL:
-            logger.info(f"Webhook rejimida ishga tushirilmoqda: {settings.WEBHOOK_URL}")
-            await bot.set_webhook(url=settings.WEBHOOK_URL)
+            webhook_path = "/webhook"
+            webhook_url = f"{settings.WEBHOOK_URL.rstrip('/')}{webhook_path}"
+            logger.info(f"🚀 Webhook rejimida ishga tushirilmoqda: {webhook_url} (Port: {settings.PORT})")
+
+            app = web.Application()
+            app.router.add_get("/", handle_health)
+            app.router.add_get("/health", handle_health)
+
+            webhook_handler = SimpleRequestHandler(
+                dispatcher=dp,
+                bot=bot,
+                secret_token=settings.WEBHOOK_SECRET,
+            )
+            webhook_handler.register(app, path=webhook_path)
+            setup_application(app, dp, bot=bot)
+
+            await bot.set_webhook(
+                url=webhook_url,
+                secret_token=settings.WEBHOOK_SECRET,
+                drop_pending_updates=True,
+                allowed_updates=dp.resolve_used_update_types(),
+            )
+
+            webhook_runner = web.AppRunner(app)
+            await webhook_runner.setup()
+            site = web.TCPSite(webhook_runner, "0.0.0.0", settings.PORT)
+            await site.start()
+            logger.info(f"Aiohttp Webhook & Healthcheck server faol: http://0.0.0.0:{settings.PORT}")
+
+            # Keep server running until cancellation
+            stop_event = asyncio.Event()
+            await stop_event.wait()
         else:
+            # Long-polling mode: start background health server for Render/Cloud port checks
+            try:
+                health_runner = await start_health_server(port=settings.PORT)
+            except Exception as e:
+                logger.warning(f"Could not start HTTP health server on port {settings.PORT}: {e}")
+
             logger.info("Long-polling rejimida ishga tushirilmoqda...")
             await bot.delete_webhook(drop_pending_updates=True)
             await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         for t in worker_tasks:
             t.cancel()
+        if webhook_runner:
+            await webhook_runner.cleanup()
         if health_runner:
             await health_runner.cleanup()
         await bot.session.close()

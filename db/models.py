@@ -23,6 +23,18 @@ class User(Base):
     id = Column(BigInteger, primary_key=True)  # Telegram user ID
     username = Column(String(128), nullable=True)
     full_name = Column(String(256), nullable=False, default="")
+    extra_credits = Column(Integer, default=0, nullable=False)
+    referral_count = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, default=func.now())
+
+
+class Referral(Base):
+    __tablename__ = "referrals"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    referrer_id = Column(BigInteger, index=True, nullable=False)
+    referred_id = Column(BigInteger, unique=True, index=True, nullable=False)
+    reward_given = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=func.now())
 
 
