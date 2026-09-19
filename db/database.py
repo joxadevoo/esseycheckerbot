@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from sqlalchemy import select, and_, func
 
 from config import settings
-from db.models import Base, User, Group, GroupMember, Essay, DailyUsage, GroupTopic, GroupMemberRole, Referral
+from db.models import Base, User, Group, GroupMember, Essay, DailyUsage, GroupTopic, GroupMemberRole, Referral, Payment
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +116,68 @@ async def add_user_credits(user_id: int, count: int) -> int:
             user.extra_credits = (user.extra_credits or 0) + count
         await session.commit()
         return user.extra_credits
+
+
+async def record_payment_and_add_credits(
+    user_id: int,
+    telegram_payment_charge_id: str,
+    provider_payment_charge_id: Optional[str],
+    package_id: str,
+    stars_amount: int,
+    essays_count: int,
+) -> Tuple[bool, int]:
+    """
+    Saves the payment receipt to the payments table (Supabase/DB) and adds credits to user.
+    Idempotent: if charge_id already exists, does not double-credit.
+    Returns (is_new: bool, new_total_credits: int).
+    """
+    async with get_session() as session:
+        stmt = select(Payment).where(
+            Payment.telegram_payment_charge_id == telegram_payment_charge_id
+        )
+        existing = (await session.execute(stmt)).scalar_one_or_none()
+        user = await session.get(User, user_id)
+        current_credits = user.extra_credits if user and user.extra_credits else 0
+
+        if existing:
+            logger.warning(
+                f"Payment receipt {telegram_payment_charge_id} already exists for user {user_id}. Skipping double-credit."
+            )
+            return False, current_credits
+
+        # Save payment receipt to DB
+        payment = Payment(
+            user_id=user_id,
+            telegram_payment_charge_id=telegram_payment_charge_id,
+            provider_payment_charge_id=provider_payment_charge_id,
+            package_id=package_id,
+            stars_amount=stars_amount,
+            essays_count=essays_count,
+        )
+        session.add(payment)
+
+        # Update user balance
+        if not user:
+            user = User(id=user_id, extra_credits=essays_count)
+            session.add(user)
+            new_credits = essays_count
+        else:
+            user.extra_credits = (user.extra_credits or 0) + essays_count
+            new_credits = user.extra_credits
+
+        await session.commit()
+        logger.info(
+            f"Payment receipt saved in DB: user={user_id}, charge_id={telegram_payment_charge_id}, "
+            f"stars={stars_amount}, essays=+{essays_count}, new_balance={new_credits}"
+        )
+        return True, new_credits
+
+
+async def get_payment_by_charge_id(charge_id: str) -> Optional[Payment]:
+    """Retrieves payment receipt by Telegram charge ID."""
+    async with get_session() as session:
+        stmt = select(Payment).where(Payment.telegram_payment_charge_id == charge_id)
+        return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def get_user_credits(user_id: int) -> int:

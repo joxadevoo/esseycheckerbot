@@ -36,10 +36,12 @@ from db.database import (
     upsert_group_member,
     add_user_credits,
     get_user_credits,
+    record_payment_and_add_credits,
+    get_payment_by_charge_id,
     process_referral,
     get_user_referral_stats,
 )
-from db.models import User, Group, GroupTopic, GroupMemberRole, GroupMember, Essay, DailyUsage, Referral
+from db.models import User, Group, GroupTopic, GroupMemberRole, GroupMember, Essay, DailyUsage, Referral, Payment
 from services.report_service import (
     calculate_group_report_data,
     format_report_text,
@@ -203,10 +205,11 @@ async def run_tests():
     print("✅ Telegram Stars packages (15, 35, 75 Stars) verified")
 
     from sqlalchemy import delete
-    from db.models import DailyUsage, User, Referral
+    from db.models import DailyUsage, User, Referral, Payment
     async with get_session() as session:
         await session.execute(delete(DailyUsage).where(DailyUsage.target_id.in_([test_user_id, 888777666, 777111222, 777333444])))
         await session.execute(delete(Referral).where(Referral.referred_id.in_([777333444])))
+        await session.execute(delete(Payment).where(Payment.user_id.in_([888777666])))
         await session.execute(delete(User).where(User.id.in_([888777666, 777111222, 777333444])))
         await session.commit()
 
@@ -215,10 +218,40 @@ async def run_tests():
     initial_credits = await get_user_credits(test_buyer_id)
     assert initial_credits == 0
 
-    new_credits = await add_user_credits(test_buyer_id, count=10)
-    assert new_credits == 10
+    # Test recording payment receipt
+    test_charge_id = "tg_charge_test_99887766"
+    is_new, new_credits = await record_payment_and_add_credits(
+        user_id=test_buyer_id,
+        telegram_payment_charge_id=test_charge_id,
+        provider_payment_charge_id="prov_charge_123",
+        package_id="pkg_10",
+        stars_amount=35,
+        essays_count=10,
+    )
+    assert is_new and new_credits == 10
     assert await get_user_credits(test_buyer_id) == 10
-    print("✅ add_user_credits & get_user_credits verified (10 credits added)")
+
+    # Verify payment receipt exists in database
+    saved_receipt = await get_payment_by_charge_id(test_charge_id)
+    assert saved_receipt is not None
+    assert saved_receipt.user_id == test_buyer_id
+    assert saved_receipt.stars_amount == 35
+    assert saved_receipt.essays_count == 10
+    assert saved_receipt.package_id == "pkg_10"
+    print(f"✅ Payment receipt recorded in DB: charge_id={test_charge_id}, 35 Stars, 10 essays")
+
+    # Verify idempotency (duplicate callback should NOT double-credit)
+    is_new_dup, cred_dup = await record_payment_and_add_credits(
+        user_id=test_buyer_id,
+        telegram_payment_charge_id=test_charge_id,
+        provider_payment_charge_id="prov_charge_123",
+        package_id="pkg_10",
+        stars_amount=35,
+        essays_count=10,
+    )
+    assert not is_new_dup and cred_dup == 10
+    assert await get_user_credits(test_buyer_id) == 10
+    print("✅ Duplicate payment receipt protection (idempotency) verified")
 
     # Test limit bypass via extra_credits when daily limit is exhausted
     async with get_session() as session:

@@ -38,6 +38,19 @@ class Referral(Base):
     created_at = Column(DateTime, default=func.now())
 
 
+class Payment(Base):
+    __tablename__ = "payments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(BigInteger, index=True, nullable=False)
+    telegram_payment_charge_id = Column(String(128), unique=True, index=True, nullable=False)
+    provider_payment_charge_id = Column(String(128), nullable=True)
+    package_id = Column(String(64), nullable=False)
+    stars_amount = Column(Integer, nullable=False)
+    essays_count = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=func.now())
+
+
 class Group(Base):
     __tablename__ = "groups"
 

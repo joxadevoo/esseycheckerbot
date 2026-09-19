@@ -12,6 +12,7 @@ from config import settings
 from db.database import (
     get_user_credits,
     add_user_credits,
+    record_payment_and_add_credits,
     get_user_daily_usage,
     upsert_user,
 )
@@ -185,18 +186,31 @@ async def process_successful_payment(message: types.Message):
 
     pkg = STARS_PACKAGES.get(pkg_id)
     essays_count = pkg["essays"] if pkg else 10
+    stars_amount = payment.total_amount
+    charge_id = payment.telegram_payment_charge_id
+    provider_charge_id = payment.provider_payment_charge_id or ""
 
-    new_total = await add_user_credits(user.id, essays_count)
+    is_new, new_total = await record_payment_and_add_credits(
+        user_id=user.id,
+        telegram_payment_charge_id=charge_id,
+        provider_payment_charge_id=provider_charge_id,
+        package_id=pkg_id,
+        stars_amount=stars_amount,
+        essays_count=essays_count,
+    )
+
     logger.info(
-        f"Payment SUCCESS: user {user.id} paid {payment.total_amount} Stars for {essays_count} essays. New balance: {new_total}"
+        f"Payment SUCCESS: user {user.id} paid {stars_amount} Stars for {essays_count} essays. "
+        f"Charge ID: {charge_id}. New balance: {new_total}"
     )
 
     success_text = (
         "🎉 <b>To'lovingiz muvaffaqiyatli qabul qilindi!</b>\n\n"
-        f"⭐️ <b>To'langan miqdor:</b> {payment.total_amount} Stars\n"
+        f"🧾 <b>Rasmiy chek raqami (ID):</b> <code>{charge_id}</code>\n"
+        f"⭐️ <b>To'langan miqdor:</b> {stars_amount} Stars\n"
         f"📥 <b>Qo'shilgan insholar:</b> +{essays_count} ta\n"
         f"💎 <b>Jami qo'shimcha balansingiz:</b> <b>{new_total} ta insho</b>\n\n"
-        "✅ <i>Ushbu insholar muddatsiz saqlanadi. Endi bemalol o'z insholaringizni yuborishingiz mumkin, bot ularni navbatsiz tekshirib beradi!</i>"
+        "✅ <i>Ushbu to'lov ma'lumotlar bazasida saqlandi. Insholar muddatsiz saqlanadi va kuymaydi!</i>"
     )
 
     kb = InlineKeyboardMarkup(
