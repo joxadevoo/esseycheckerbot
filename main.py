@@ -25,6 +25,7 @@ from db.database import init_db
 from handlers.messages import router
 from handlers.payments import payments_router
 from handlers.referral import referral_router
+from handlers.feedback import feedback_router
 from services.worker import start_worker
 
 logging.basicConfig(
@@ -90,6 +91,7 @@ async def setup_bot_commands(bot: Bot):
             BotCommand(command="referral", description="🎁 Do'stlarni taklif qilish va bonus insholar"),
             BotCommand(command="balance", description="💎 Insholar balansi va Stars orqali xarid"),
             BotCommand(command="buy", description="⭐️ Qo'shimcha insholar xarid qilish"),
+            BotCommand(command="feedback", description="💬 Taklif, savol yoki hamkorlik"),
             BotCommand(command="help", description="ℹ️ Yordam va IELTS mezonlari"),
         ]
         await bot.set_my_commands(private_commands, scope=BotCommandScopeAllPrivateChats())
@@ -117,6 +119,7 @@ async def main():
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher()
+    dp.include_router(feedback_router)
     dp.include_router(payments_router)
     dp.include_router(referral_router)
     dp.include_router(router)

@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "gpt-5.6-luna"
 
     GROQ_API_KEY: Optional[str] = None
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_MODEL: str = "openai/gpt-oss-120b"
 
     DATABASE_URL: str = "sqlite+aiosqlite:///bot.db"
     REDIS_URL: Optional[str] = None
@@ -37,7 +37,10 @@ class Settings(BaseSettings):
     WEBHOOK_SECRET: Optional[str] = None
     PORT: int = 8080
 
-    ADMIN_IDS: str = "7326292681"
+    # Dedicated real developer / admin ID (for feedback & collaboration inquiries)
+    DEVELOPER_CHAT_ID: int = 7326292681
+
+    ADMIN_IDS: str = ""
 
     model_config = SettingsConfigDict(
         env_file=env_file_path,
@@ -46,8 +49,6 @@ class Settings(BaseSettings):
     )
 
     def is_admin(self, user_id: int) -> bool:
-        if user_id == 7326292681:
-            return True
         admin_list = [int(i.strip()) for i in self.ADMIN_IDS.split(",") if i.strip().isdigit()]
         return user_id in admin_list
 

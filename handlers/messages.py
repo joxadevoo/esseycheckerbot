@@ -112,6 +112,7 @@ def get_start_keyboard(is_teacher: bool = False) -> InlineKeyboardMarkup:
     ])
     buttons.append([
         InlineKeyboardButton(text="ℹ️ Qoidalar va Yordam", callback_data="fsm:help"),
+        InlineKeyboardButton(text="💬 Taklif va Hamkorlik", callback_data="feedback:start"),
     ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -355,7 +356,9 @@ async def handle_help(message: types.Message):
             "   • Ustoz yangi savolni <code>/new [Savol]</code> yoki <code>#task2 [Savol]</code> deb tashlaydi.\n"
             "   • O'quvchilar o'sha savolga <b>Reply</b> qilib yoki <code>#essay</code> bilan insho yuboradi.\n\n"
             "3. <b>Rasmiy IELTS mezonlari:</b>\n"
-            "   • Task 2 inshosi uchun 250+ so'z (kam bo'lsa Task Response 5.5 dan oshmaydi).\n"
+            "   • Task 2 inshosi uchun 250+ so'z (kam bo'lsa Task Response 5.5 dan oshmaydi).\n\n"
+            "4. <b>Taklif, Savol va Hamkorlik:</b>\n"
+            "   • Dasturchi va ma'muriyatga taklif yoki savol yuborish uchun <code>/feedback</code> buyrug'idan foydalaning.\n"
         )
     await message.answer(help_text, parse_mode="HTML")
 

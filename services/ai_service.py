@@ -389,109 +389,136 @@ class AIService:
             f"<candidate_essay_text>\n{essay_text}\n</candidate_essay_text>"
         )
 
-        for attempt in range(max_retries):
-            try:
-                if self.provider == "openai":
-                    client = self.get_openai_client()
-                    model_name = self.openai_model
-                    logger.info(f"Submitting essay to OpenAI ({model_name}), attempt {attempt + 1}/{max_retries}...")
+        # Provider execution sequence (Primary -> Fallback)
+        providers_to_try = []
+        primary_provider = settings.AI_PROVIDER.lower()
 
-                    is_reasoning = any(x in model_name.lower() for x in ["gpt-5", "luna", "o1", "o3"])
-                    openai_kwargs: Dict[str, Any] = {
-                        "model": model_name,
-                        "messages": [
-                            {"role": "system", "content": SYSTEM_PROMPT},
-                            {"role": "user", "content": prompt_content},
-                        ],
-                        "response_format": {"type": "json_object"},
-                    }
-                    if is_reasoning:
-                        # Reasoning models (Luna, GPT-5, o-series) do not accept custom temperature
-                        # and need max_completion_tokens to cover both reasoning + output tokens.
-                        openai_kwargs["max_completion_tokens"] = 4000
-                        openai_kwargs["reasoning_effort"] = "medium"
+        if primary_provider == "openai":
+            if settings.OPENAI_API_KEY:
+                providers_to_try.append(("openai", self.openai_model))
+            if settings.GROQ_API_KEY:
+                providers_to_try.append(("groq", self.groq_model))
+        else:
+            if settings.GROQ_API_KEY:
+                providers_to_try.append(("groq", self.groq_model))
+            if settings.OPENAI_API_KEY:
+                providers_to_try.append(("openai", self.openai_model))
+
+        if not providers_to_try:
+            providers_to_try.append(("openai", self.openai_model))
+
+        last_error = None
+
+        for p_idx, (prov_name, model_name) in enumerate(providers_to_try):
+            is_fallback = (p_idx > 0)
+            if is_fallback:
+                logger.warning(
+                    f"⚠️ Primary provider failed. Activating FALLBACK: {prov_name} ({model_name})..."
+                )
+
+            # Retry 2 times per provider before switching to fallback
+            retries_per_provider = 2 if len(providers_to_try) > 1 else max_retries
+
+            for attempt in range(retries_per_provider):
+                try:
+                    if prov_name == "openai":
+                        client = self.get_openai_client()
+                        logger.info(f"Submitting essay to OpenAI ({model_name}), attempt {attempt + 1}/{retries_per_provider}...")
+
+                        is_reasoning = any(x in model_name.lower() for x in ["gpt-5", "luna", "o1", "o3"])
+                        openai_kwargs: Dict[str, Any] = {
+                            "model": model_name,
+                            "messages": [
+                                {"role": "system", "content": SYSTEM_PROMPT},
+                                {"role": "user", "content": prompt_content},
+                            ],
+                            "response_format": {"type": "json_object"},
+                        }
+                        if is_reasoning:
+                            openai_kwargs["max_completion_tokens"] = 4000
+                            openai_kwargs["reasoning_effort"] = "medium"
+                        else:
+                            openai_kwargs["max_tokens"] = 2500
+                            openai_kwargs["temperature"] = 0.2
+
+                        response = await client.chat.completions.create(**openai_kwargs)
                     else:
-                        openai_kwargs["max_tokens"] = 2500
-                        openai_kwargs["temperature"] = 0.2
+                        client = self.get_groq_client()
+                        logger.info(f"Submitting essay to Groq ({model_name}), attempt {attempt + 1}/{retries_per_provider}...")
 
-                    response = await client.chat.completions.create(**openai_kwargs)
-                else:
-                    client = self.get_groq_client()
-                    model_name = self.groq_model
-                    logger.info(f"Submitting essay to Groq ({model_name}), attempt {attempt + 1}/{max_retries}...")
+                        response = await client.chat.completions.create(
+                            model=model_name,
+                            messages=[
+                                {"role": "system", "content": SYSTEM_PROMPT},
+                                {"role": "user", "content": prompt_content},
+                            ],
+                            response_format={"type": "json_object"},
+                            temperature=0.2,
+                            max_tokens=2500,
+                        )
 
-                    response = await client.chat.completions.create(
-                        model=model_name,
-                        messages=[
-                            {"role": "system", "content": SYSTEM_PROMPT},
-                            {"role": "user", "content": prompt_content},
-                        ],
-                        response_format={"type": "json_object"},
-                        temperature=0.2,
-                        max_tokens=2500,
-                    )
+                    content = response.choices[0].message.content
+                    cleaned_content = clean_json_string(content)
+                    data = json.loads(cleaned_content)
 
-                content = response.choices[0].message.content
-                cleaned_content = clean_json_string(content)
-                data = json.loads(cleaned_content)
+                    # Authoritative word count & rules enforcement in Python
+                    data["word_count"] = word_count
+                    data["meets_minimum"] = (word_count >= 250)
 
-                # Authoritative word count & rules enforcement in Python
-                data["word_count"] = word_count
-                data["meets_minimum"] = (word_count >= 250)
+                    descriptors = data.get("scores_by_official_descriptors", {})
 
-                descriptors = data.get("scores_by_official_descriptors", {})
+                    def _get_band(primary_k: str, fallback_ks: list) -> Optional[float]:
+                        for k in [primary_k] + fallback_ks:
+                            val = descriptors.get(k) or data.get(k)
+                            if isinstance(val, dict) and "band" in val:
+                                val = val.get("band")
+                            if val is not None:
+                                try:
+                                    return float(val)
+                                except (ValueError, TypeError):
+                                    pass
+                        return None
 
-                def _get_band(primary_k: str, fallback_ks: list) -> Optional[float]:
-                    for k in [primary_k] + fallback_ks:
-                        val = descriptors.get(k) or data.get(k)
-                        if isinstance(val, dict) and "band" in val:
-                            val = val.get("band")
-                        if val is not None:
-                            try:
-                                return float(val)
-                            except (ValueError, TypeError):
-                                pass
-                    return None
+                    tr_b = _get_band("task_response", ["task_achievement", "tr"])
+                    cc_b = _get_band("coherence_cohesion", ["coherence", "cc"])
+                    lr_b = _get_band("lexical_resource", ["lexical", "lr"])
+                    gr_b = _get_band("grammatical_accuracy", ["grammar", "gra", "grammatical_range_and_accuracy"])
 
-                tr_b = _get_band("task_response", ["task_achievement", "tr"])
-                cc_b = _get_band("coherence_cohesion", ["coherence", "cc"])
-                lr_b = _get_band("lexical_resource", ["lexical", "lr"])
-                gr_b = _get_band("grammatical_accuracy", ["grammar", "gra", "grammatical_range_and_accuracy"])
+                    # Enforce under-length penalty (<250 words -> TR cap 5.5)
+                    if word_count < 250:
+                        if tr_b is not None and tr_b > 5.5:
+                            tr_b = 5.5
+                            if "task_response" in descriptors and isinstance(descriptors["task_response"], dict):
+                                descriptors["task_response"]["band"] = 5.5
+                            elif "tr" in data and isinstance(data["tr"], dict):
+                                data["tr"]["band"] = 5.5
 
-                # Enforce under-length penalty (<250 words -> TR cap 5.5)
-                if word_count < 250:
-                    if tr_b is not None and tr_b > 5.5:
-                        tr_b = 5.5
-                        if "task_response" in descriptors and isinstance(descriptors["task_response"], dict):
-                            descriptors["task_response"]["band"] = 5.5
-                        elif "tr" in data and isinstance(data["tr"], dict):
-                            data["tr"]["band"] = 5.5
+                    # Authoritatively compute official IELTS Overall Band in Python
+                    if tr_b is not None and cc_b is not None and lr_b is not None and gr_b is not None:
+                        official_overall = calculate_ielts_overall(tr_b, cc_b, lr_b, gr_b)
+                        data["current_overall_band"] = official_overall
+                        data["overall"] = official_overall
+                        data["overall_band"] = official_overall
+                        data["next_target_band"] = min(9.0, official_overall + 0.5)
 
-                # Authoritatively compute official IELTS Overall Band in Python
-                if tr_b is not None and cc_b is not None and lr_b is not None and gr_b is not None:
-                    official_overall = calculate_ielts_overall(tr_b, cc_b, lr_b, gr_b)
-                    data["current_overall_band"] = official_overall
-                    data["overall"] = official_overall
-                    data["overall_band"] = official_overall
-                    data["next_target_band"] = min(9.0, official_overall + 0.5)
+                    data["_model"] = model_name
+                    data["_provider"] = prov_name
+                    if is_fallback:
+                        data["_used_fallback"] = True
 
-                data["_model"] = model_name
-                data["_provider"] = self.provider
+                    band = data.get("current_overall_band") or data.get("overall", "N/A")
+                    logger.info(f"AI evaluation successful via {prov_name} ({model_name}). Band: {band} (Words: {word_count})")
+                    return data
 
-                band = data.get("current_overall_band") or data.get("overall", "N/A")
-                logger.info(f"AI evaluation successful via {self.provider} ({model_name}). Band: {band} (Words: {word_count})")
-                return data
+                except Exception as e:
+                    last_error = e
+                    logger.warning(f"AI API error ({prov_name}) on attempt {attempt + 1}: {e}")
+                    if attempt < retries_per_provider - 1:
+                        await asyncio.sleep(2)
 
-            except Exception as e:
-                last_error = e
-                logger.warning(f"AI API error ({self.provider}) on attempt {attempt + 1}: {e}")
-                if attempt < max_retries - 1:
-                    sleep_sec = delays[attempt]
-                    logger.info(f"Retrying in {sleep_sec} seconds...")
-                    await asyncio.sleep(sleep_sec)
-
-        logger.error(f"Failed to evaluate essay after {max_retries} attempts: {last_error}")
+        logger.error(f"Failed to evaluate essay across all providers (last error: {last_error})")
         raise RuntimeError("Kechirasiz, botda vaqtinchalik nosozlik yuz berdi. Biz uni tuzatish ustida ishlayapmiz.")
+
 
 
 ai_service = AIService()

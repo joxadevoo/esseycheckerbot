@@ -120,3 +120,20 @@ class DailyUsage(Base):
     target_id = Column(BigInteger, nullable=False)
     usage_date = Column(Date, default=date.today, nullable=False)
     count = Column(Integer, default=0, nullable=False)
+
+
+class Feedback(Base):
+    __tablename__ = "feedbacks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(BigInteger, index=True, nullable=False)
+    user_message_id = Column(BigInteger, nullable=True)
+    admin_id = Column(BigInteger, index=True, nullable=True)
+    admin_message_id = Column(BigInteger, index=True, nullable=True)
+    text = Column(Text, nullable=True)
+    media_type = Column(String(32), default="text", nullable=False)
+    status = Column(String(32), default="pending", nullable=False)
+    reply_text = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    replied_at = Column(DateTime, nullable=True)
+

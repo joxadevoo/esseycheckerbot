@@ -40,8 +40,12 @@ from db.database import (
     get_payment_by_charge_id,
     process_referral,
     get_user_referral_stats,
+    save_feedback,
+    update_feedback_admin_msg,
+    get_feedback_by_admin_msg,
+    mark_feedback_answered,
 )
-from db.models import User, Group, GroupTopic, GroupMemberRole, GroupMember, Essay, DailyUsage, Referral, Payment
+from db.models import User, Group, GroupTopic, GroupMemberRole, GroupMember, Essay, DailyUsage, Referral, Payment, Feedback
 from services.report_service import (
     calculate_group_report_data,
     format_report_text,
@@ -555,6 +559,42 @@ async def run_tests():
     assert len(excel_bytes) > 1000, "Excel bytes too small"
     assert excel_bytes[:4] == b"PK\x03\x04", "Invalid ZIP/XLSX header"
     print(f"✅ Excel spreadsheet export verified ({len(excel_bytes)} bytes XLSX)")
+
+    # 7. Testing Feedback, Support & Admin Reply Mechanism
+    print("\n--- 7. Testing Feedback & Support Ticket System ---")
+    test_user_id = 998877661
+    admin_id = 7326292681
+    admin_msg_id = 456789
+
+    # User submits feedback
+    fb = await save_feedback(
+        user_id=test_user_id,
+        user_message_id=1234,
+        text="Assalomu alaykum, bot juda ajoyib! Hamkorlik qilmoqchimiz.",
+        media_type="text",
+    )
+    assert fb.id is not None
+    assert fb.status == "pending"
+    assert fb.user_id == test_user_id
+    print(f"✅ Feedback submission created: ID #{fb.id}, Status: {fb.status}")
+
+    # Admin message id mapping
+    await update_feedback_admin_msg(fb.id, admin_id=admin_id, admin_message_id=admin_msg_id)
+    fb_fetched = await get_feedback_by_admin_msg(admin_id=admin_id, admin_message_id=admin_msg_id)
+    assert fb_fetched is not None
+    assert fb_fetched.id == fb.id
+    assert fb_fetched.user_id == test_user_id
+    print("✅ Admin message mapping & lookup by admin_message_id verified")
+
+    # Admin replies to the feedback
+    reply_content = "Vaalaykum assalom! Taklifingiz uchun rahmat, bog'lanamiz."
+    await mark_feedback_answered(fb.id, reply_text=reply_content)
+    async with get_session() as session:
+        fb_updated = await session.get(Feedback, fb.id)
+        assert fb_updated.status == "answered"
+        assert fb_updated.reply_text == reply_content
+        assert fb_updated.replied_at is not None
+    print("✅ Admin reply recording & status update ('answered') verified")
 
     print("\n========================================")
     print("🎉 ALL TESTS PASSED SUCCESSFULLY!")

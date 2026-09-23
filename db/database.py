@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from sqlalchemy import select, and_, func
 
 from config import settings
-from db.models import Base, User, Group, GroupMember, Essay, DailyUsage, GroupTopic, GroupMemberRole, Referral, Payment
+from db.models import Base, User, Group, GroupMember, Essay, DailyUsage, GroupTopic, GroupMemberRole, Referral, Payment, Feedback
 
 logger = logging.getLogger(__name__)
 
@@ -654,3 +654,66 @@ async def get_user_teacher_groups(
                     groups_map[gid] = gtitle or f"Guruh #{gid}"
 
         return list(groups_map.items())
+
+
+async def save_feedback(
+    user_id: int,
+    user_message_id: Optional[int] = None,
+    text: Optional[str] = None,
+    media_type: str = "text",
+    admin_id: Optional[int] = None,
+    admin_message_id: Optional[int] = None,
+) -> Feedback:
+    """Saves a new user feedback/support ticket into database."""
+    async with get_session() as session:
+        fb = Feedback(
+            user_id=user_id,
+            user_message_id=user_message_id,
+            text=text,
+            media_type=media_type,
+            admin_id=admin_id,
+            admin_message_id=admin_message_id,
+            status="pending",
+        )
+        session.add(fb)
+        await session.commit()
+        await session.refresh(fb)
+        return fb
+
+
+async def update_feedback_admin_msg(feedback_id: int, admin_id: int, admin_message_id: int):
+    """Updates the admin message ID mapping for a feedback ticket."""
+    async with get_session() as session:
+        fb = await session.get(Feedback, feedback_id)
+        if fb:
+            fb.admin_id = admin_id
+            fb.admin_message_id = admin_message_id
+            await session.commit()
+
+
+async def get_feedback_by_admin_msg(admin_id: int, admin_message_id: int) -> Optional[Feedback]:
+    """Finds pending or existing feedback associated with an admin's notification message."""
+    async with get_session() as session:
+        stmt = (
+            select(Feedback)
+            .where(
+                and_(
+                    Feedback.admin_id == admin_id,
+                    Feedback.admin_message_id == admin_message_id,
+                )
+            )
+            .order_by(Feedback.created_at.desc())
+        )
+        res = await session.execute(stmt)
+        return res.scalars().first()
+
+
+async def mark_feedback_answered(feedback_id: int, reply_text: str):
+    """Marks feedback as answered and stores reply text."""
+    async with get_session() as session:
+        fb = await session.get(Feedback, feedback_id)
+        if fb:
+            fb.status = "answered"
+            fb.reply_text = reply_text
+            fb.replied_at = func.now()
+            await session.commit()
