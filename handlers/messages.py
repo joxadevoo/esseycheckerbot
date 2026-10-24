@@ -14,6 +14,7 @@ from db.database import (
     upsert_user,
     upsert_group,
     upsert_group_member,
+    record_group_addition_reward,
     check_and_increment_limits,
     get_session,
     get_group_topic,
@@ -21,6 +22,7 @@ from db.database import (
     clear_group_topic,
     set_group_user_role,
     remove_group_user_role,
+    is_whitelist_teacher_group,
     get_group_roles,
     check_user_role_in_group,
     get_group_topic_submissions,
@@ -92,7 +94,7 @@ class EssayFSM(StatesGroup):
     waiting_for_essay = State()
 
 
-def get_start_keyboard(is_teacher: bool = False) -> InlineKeyboardMarkup:
+def get_start_keyboard(is_teacher: bool = False, bot_username: str = "esseycheckerbot") -> InlineKeyboardMarkup:
     buttons = [
         [
             InlineKeyboardButton(
@@ -107,12 +109,18 @@ def get_start_keyboard(is_teacher: bool = False) -> InlineKeyboardMarkup:
             )
         ])
     buttons.append([
-        InlineKeyboardButton(text="🎁 Do'stlarni taklif qilish", callback_data="ref:menu"),
-        InlineKeyboardButton(text="💎 Balans / Xarid", callback_data="buy:menu"),
+        InlineKeyboardButton(
+            text="👥 Guruhga qo'shish (+3 insho)", url=f"https://t.me/{bot_username}?startgroup=add"
+        ),
+        InlineKeyboardButton(text="🎁 Do'st taklifi (+1)", callback_data="ref:menu"),
     ])
     buttons.append([
-        InlineKeyboardButton(text="ℹ️ Qoidalar va Yordam", callback_data="fsm:help"),
-        InlineKeyboardButton(text="💬 Taklif va Hamkorlik", callback_data="feedback:start"),
+        InlineKeyboardButton(text="💎 Balans / Stars", callback_data="buy:menu"),
+        InlineKeyboardButton(text="👨‍🏫 Teacher Pro", callback_data="teacher:info"),
+    ])
+    buttons.append([
+        InlineKeyboardButton(text="ℹ️ Qoidalar", callback_data="fsm:help"),
+        InlineKeyboardButton(text="💬 Taklif va Aloqa", callback_data="feedback:start"),
     ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -153,8 +161,9 @@ def get_topic_replace_keyboard() -> InlineKeyboardMarkup:
 async def handle_start(message: types.Message, state: FSMContext):
     await state.clear()
     user = message.from_user
-    if user:
-        await upsert_user(user.id, user.username, user.full_name)
+    if not user:
+        return
+    await upsert_user(user.id, user.username, user.full_name)
 
     # Deep linking check (e.g. /start ref_123, /start buy, /start referral, /start report_12 or /start groupreport_-1001234)
     parts = (message.text or "").split(maxsplit=1)
@@ -166,6 +175,14 @@ async def handle_start(message: types.Message, state: FSMContext):
     if len(parts) > 1 and parts[1] in ("referral", "taklif", "ref"):
         from handlers.referral import handle_referral_command
         await handle_referral_command(message)
+        return
+
+    if len(parts) > 1 and parts[1] in ("teacher", "ustoz"):
+        await handle_teacher_command(message)
+        return
+
+    if len(parts) > 1 and parts[1] in ("check", "tekshirish"):
+        await handle_new_command(message, state)
         return
 
     welcome_bonus_text = ""
@@ -273,7 +290,13 @@ async def handle_start(message: types.Message, state: FSMContext):
             f"\n\n👨‍🏫 <b>Ustoz bo'limi:</b> Siz <b>{len(teacher_groups)} ta</b> guruhda ustoz/admin sifatida qayd etilgansiz. "
             f"Guruhdagi o'quvchilar natijalari, tahliliy grafik va Excel hisobotlarini olish uchun pastdagi <b>«🏫 Mening guruhlarim»</b> tugmasini bosing."
         )
-    await message.answer(welcome_text, parse_mode="HTML", reply_markup=get_start_keyboard(is_teacher=is_teacher))
+    bot_user = await message.bot.get_me()
+    b_username = bot_user.username or "esseycheckerbot"
+    await message.answer(
+        welcome_text,
+        parse_mode="HTML",
+        reply_markup=get_start_keyboard(is_teacher=is_teacher, bot_username=b_username),
+    )
 
 
 @router.message(Command("check"))
@@ -318,8 +341,8 @@ async def handle_new_command(message: types.Message, state: FSMContext):
         prompt_text = None
         if len(parts) > 1 and parts[1].strip():
             prompt_text = parts[1].strip()
-        elif message.reply_to_message and message.reply_to_message.text:
-            prompt_text = message.reply_to_message.text.strip()
+        elif message.reply_to_message:
+            prompt_text = (message.reply_to_message.text or message.reply_to_message.caption or "").strip() or None
 
         if prompt_text:
             await process_new_group_topic(message, prompt_text)
@@ -374,8 +397,8 @@ async def handle_topic_command(message: types.Message):
     prompt_text = None
     if len(parts) > 1 and parts[1].strip():
         prompt_text = parts[1].strip()
-    elif message.reply_to_message and message.reply_to_message.text:
-        prompt_text = message.reply_to_message.text.strip()
+    elif message.reply_to_message:
+        prompt_text = (message.reply_to_message.text or message.reply_to_message.caption or "").strip() or None
 
     if prompt_text:
         can_post = await is_teacher_or_admin(message.bot, message.chat.id, message.from_user)
@@ -458,9 +481,15 @@ async def handle_set_teacher_command(message: types.Message):
         role="teacher",
         assigned_by=user.id if user else None,
     )
+    is_whitelisted = await is_whitelist_teacher_group(message.chat.id)
+    if is_whitelisted:
+        status_note = f"\n\n⭐️ <i>Ushbu guruh bepul ruxsat berilgan 5 ta ustoz guruhlaridan biri hisoblanadi (cheksiz).</i>"
+    else:
+        status_note = f"\n\nℹ️ <i>Eslatma: Ushbu guruh uchun umumiy bepul limit ({settings.DAILY_GROUP_LIMIT} ta) amal qiladi. Cheksiz guruh insholari uchun <b>/teacher</b> orqali Teacher Pro obunasi talab qilinadi.</i>"
+
     await message.reply(
         f"✅ <b>@{target_username}</b> ushbu guruhga rasmiy <b>Ustoz</b> sifatida biriktirildi!\n\n"
-        f"Endi u yangi mavzu (<code>#task2</code>) kiritishi va savol qabulini yakunlashi (<code>/stop</code>) mumkin.",
+        f"Endi u yangi mavzu (<code>#task2</code>) kiritishi va savol qabulini yakunlashi (<code>/stop</code>) mumkin.{status_note}",
         parse_mode="HTML",
     )
 
@@ -1035,12 +1064,20 @@ async def handle_fsm_essay_text(message: types.Message, state: FSMContext):
         user_id=user_id, chat_id=chat.id, is_private=True
     )
     if not is_allowed:
+        bot_user = await message.bot.get_me()
+        b_username = bot_user.username or "esseycheckerbot"
         buy_kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text="⭐️ Qo'shimcha insholar sotib olish",
+                        text="⭐️ Insholar sotib olish (Stars)",
                         callback_data="buy:menu",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="👥 Guruhga qo'shish (+3 bepul insho)",
+                        url=f"https://t.me/{b_username}?startgroup=add",
                     )
                 ],
                 [
@@ -1168,8 +1205,12 @@ async def handle_general_text_message(message: types.Message):
 
     essay_match = HASHTAG_PATTERN.search(text)
     topic_match = TOPIC_HASHTAG_PATTERN.search(text)
-    is_reply = bool(message.reply_to_message and message.reply_to_message.text)
-    replied_text = message.reply_to_message.text.strip() if is_reply else ""
+    replied_text = (
+        (message.reply_to_message.text or message.reply_to_message.caption or "").strip()
+        if message.reply_to_message
+        else ""
+    )
+    is_reply = bool(message.reply_to_message and replied_text)
 
     # ----------------------------------------------------
     # GURUHDA 1-HOLAT: Ustoz savol tashlaganda (#task2, #topic, #savol)
@@ -1263,6 +1304,10 @@ async def handle_general_text_message(message: types.Message):
                 parts = clean_prompt.split("«")
                 if len(parts) >= 2:
                     clean_prompt = parts[1].split("»")[0]
+            elif "“" in clean_prompt and "”" in clean_prompt:
+                parts = clean_prompt.split("“")
+                if len(parts) >= 2:
+                    clean_prompt = parts[1].split("”")[0]
 
             if clean_prompt and 5 <= count_words(clean_prompt) < 120:
                 task_prompt = clean_prompt
@@ -1337,8 +1382,14 @@ async def handle_general_text_message(message: types.Message):
                 inline_keyboard=[
                     [
                         InlineKeyboardButton(
-                            text="⭐️ Qo'shimcha insholar sotib olish",
+                            text="⭐️ Insholar sotib olish (Stars)",
                             callback_data="buy:menu",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="👥 Guruhga qo'shish (+3 bepul insho)",
+                            url=f"https://t.me/{b_username}?startgroup=add",
                         )
                     ],
                     [
@@ -1354,8 +1405,14 @@ async def handle_general_text_message(message: types.Message):
                 inline_keyboard=[
                     [
                         InlineKeyboardButton(
-                            text="⭐️ Qo'shimcha insholar sotib olish",
+                            text="⭐️ Insholar sotib olish (Stars)",
                             url=f"https://t.me/{b_username}?start=buy",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="👥 Boshqa guruhga qo'shish (+3 insho)",
+                            url=f"https://t.me/{b_username}?startgroup=add",
                         )
                     ],
                     [
@@ -1410,10 +1467,30 @@ async def handle_general_text_message(message: types.Message):
 
 @router.message(F.new_chat_members)
 async def handle_new_chat_members(message: types.Message):
-    """Foydalanuvchi guruhga yangi qo'shilganda uni bazaga yozib oladi."""
+    """Foydalanuvchi yoki bot guruhga yangi qo'shilganda ishlaydi."""
     chat = message.chat
     await upsert_group(chat.id, chat.title)
+    bot_user = await message.bot.get_me()
+
     if message.new_chat_members:
+        # Check if bot itself was added
+        bot_was_added = any(u.id == bot_user.id for u in message.new_chat_members)
+        if bot_was_added:
+            adder = message.from_user
+            if adder and not adder.is_bot:
+                rewarded, new_credits = await record_group_addition_reward(chat.id, adder.id, chat.title)
+                if rewarded:
+                    congrats_text = (
+                        f"🎉 <b>Tabriklaymiz, {html.escape(adder.full_name)}!</b>\n\n"
+                        f"Siz botni <b>{html.escape(chat.title or 'guruh')}</b> guruhiga muvaffaqiyatli qo'shganingiz uchun sizga <b>+3 ta bepul insho tekshiruvi</b> berildi! 🚀\n\n"
+                        f"💎 Sizning qo'shimcha balansingiz: <b>{new_credits} ta insho</b>.\n"
+                        f"Insho matnini shaxsiy chatga yuborib xohlagan vaqtingizda tekshirtirishingiz mumkin!"
+                    )
+                    try:
+                        await message.bot.send_message(chat_id=adder.id, text=congrats_text, parse_mode="HTML")
+                    except Exception as ex:
+                        logger.warning(f"Could not send group reward DM to user {adder.id}: {ex}")
+
         for new_user in message.new_chat_members:
             if not new_user.is_bot:
                 await upsert_group_member(
@@ -1434,9 +1511,10 @@ async def handle_chat_member_update(event: types.ChatMemberUpdated):
 
 @router.my_chat_member()
 async def handle_my_chat_member_update(event: types.ChatMemberUpdated):
-    """Bot guruhga qo'shilganda yoki admin qilinganda guruhni va mavjud adminlarni ro'yxatga oladi."""
+    """Bot guruhga qo'shilganda yoki admin qilinganda guruhni ro'yxatga oladi, qo'shgan userga +3 insho beradi va guruhga kirish xabarini yuboradi."""
     chat = event.chat
     await upsert_group(chat.id, chat.title)
+
     if event.new_chat_member.status in ["administrator", "member"]:
         try:
             admins = await event.bot.get_chat_administrators(chat.id)
@@ -1447,4 +1525,146 @@ async def handle_my_chat_member_update(event: types.ChatMemberUpdated):
                     )
         except Exception:
             pass
+
+        # Reward the user who added the bot (+3 extra credits!)
+        adder = event.from_user
+        if adder and not adder.is_bot:
+            rewarded, new_credits = await record_group_addition_reward(chat.id, adder.id, chat.title)
+            if rewarded:
+                congrats_text = (
+                    f"🎉 <b>Tabriklaymiz, {html.escape(adder.full_name)}!</b>\n\n"
+                    f"Siz botni <b>{html.escape(chat.title or 'guruh')}</b> guruhiga muvaffaqiyatli qo'shganingiz uchun sizga <b>+3 ta bepul insho tekshiruvi</b> berildi! 🚀\n\n"
+                    f"💎 Sizning qo'shimcha balansingiz: <b>{new_credits} ta insho</b>.\n"
+                    f"Insho matningizni shaxsiy chatga yuborib istalgan vaqtda tekshirtirishingiz mumkin!"
+                )
+                try:
+                    await event.bot.send_message(chat_id=adder.id, text=congrats_text, parse_mode="HTML")
+                except Exception as ex:
+                    logger.warning(f"Could not send reward DM to user {adder.id}: {ex}")
+
+        # Send introductory message to the group
+        bot_user = await event.bot.get_me()
+        b_username = bot_user.username or "esseycheckerbot"
+        welcome_kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✍️ Inshoni botda tekshirish",
+                        url=f"https://t.me/{b_username}?start=check",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="👨‍🏫 Ustozlar uchun (Teacher Pro)",
+                        callback_data="teacher:info",
+                    )
+                ],
+            ]
+        )
+        group_welcome = (
+            f"👋 <b>Assalomu alaykum! IELTS Essay Checker bot ushbu guruhga muvaffaqiyatli qo'shildi!</b>\n\n"
+            f"Ushbu bot guruhdagi barcha IELTS insholarini rasmiy mezonlar (TR, CC, LR, GRA) asosida 30 soniyada tekshiradi.\n\n"
+            f"👨‍🎓 <b>O'quvchilar uchun:</b>\n"
+            f"• Inshoni <code>#essay</code> heshtegi bilan guruhga yuboring (kamida 40 ta so'z)\n"
+            f"• Natijaviy ball guruhga chiqadi, batafsil xatolar va taqriz esa shaxsiy profilingizga boradi!\n\n"
+            f"👨‍🏫 <b>Ustozlar uchun:</b>\n"
+            f"• <code>/topic Insho mavzusi</code> — Guruhga yangi vazifa mavzusini belgilash\n"
+            f"• <code>/report</code> — Barcha o'quvchilar natijalarini to'liq Excel (.xlsx) jadvalida yuklab olish\n"
+            f"• <code>/teacher</code> — Guruh uchun kengaytirilgan Teacher Pro ta'rifini faollashtirish"
+        )
+        try:
+            await event.bot.send_message(chat_id=chat.id, text=group_welcome, parse_mode="HTML", reply_markup=welcome_kb)
+        except Exception as ex:
+            logger.warning(f"Could not send welcome message to group {chat.id}: {ex}")
+
+
+@router.message(Command("teacher"))
+@router.message(Command("ustoz"))
+async def handle_teacher_command(message: types.Message):
+    """Explains Teacher Pro package, group benefits, and how to activate."""
+    bot_user = await message.bot.get_me()
+    b_username = bot_user.username or "esseycheckerbot"
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="💬 Adminga bog'lanish (@lor_kl)",
+                    url="https://t.me/lor_kl",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="👥 Botni boshqa guruhga qo'shish (+3 insho)",
+                    url=f"https://t.me/{b_username}?startgroup=add",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📊 /report hisobotini tekshirish",
+                    callback_data="teacher:my_groups",
+                )
+            ],
+        ]
+    )
+
+    text = (
+        "👨‍🏫 <b>O'QUV MARKAZLARI VA IELTS USTOZLARI UCHUN — TEACHER PRO</b>\n\n"
+        "Guruhdagi 20–30 ta o'quvchingiz insholarini qo'lda tekshirish uchun har kuni 3 soatlab vaqt sarflamang! "
+        "Bot barcha insholarni rasmiy mezonlarda tekshirib, sizga tayyor tahlilni taqdim etadi.\n\n"
+        "✨ <b>Teacher Pro afzalliklari:</b>\n"
+        "• 🚀 <b>Cheksiz insho tekshiruvi:</b> Guruhdagi barcha o'quvchilaringiz cheklovlarsiz insho yubora oladi\n"
+        "• 📊 <b>Avtomatik Excel (.xlsx) hisobot:</b> Birgina <code>/report</code> buyrug'i bilan butun guruhning ballari, reytingi va topshirish vaqtlari jadvali\n"
+        "• 📈 <b>O'sish dinamikasi:</b> Har bir o'quvchining insholar bo'yicha progress grafigi\n"
+        "• 🏷 <b>Shaxsiy brending:</b> Taqrizlar ostida o'quv markazingiz yoki repetitorlik brendingiz chiqadi\n\n"
+        "💰 <b>Narxlar:</b>\n"
+        "• 1 ta guruh: <b>150 000 so'm / oy</b> (yoki 400 ⭐️ Stars)\n"
+        "• 3+ ta guruh (O'quv markazlari): <b>Chegirmali markaz tarifi</b>\n\n"
+        "👇 <i>Guruhni Teacher Pro rejimiga ulash yoki savollar uchun:</i>"
+    )
+
+    await message.reply(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data == "teacher:info")
+async def cb_teacher_info(query: types.CallbackQuery):
+    """Callback for Teacher Pro info button."""
+    bot_user = await query.bot.get_me()
+    b_username = bot_user.username or "esseycheckerbot"
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="💬 Adminga bog'lanish (@lor_kl)",
+                    url="https://t.me/lor_kl",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="👥 Botni guruhga qo'shish (+3 insho)",
+                    url=f"https://t.me/{b_username}?startgroup=add",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔙 Asosiy menyu",
+                    callback_data="fsm:cancel",
+                )
+            ],
+        ]
+    )
+
+    text = (
+        "👨‍🏫 <b>O'QUV MARKAZLARI VA USTOZLAR UCHUN — TEACHER PRO</b>\n\n"
+        "Guruhdagi barcha o'quvchilaringiz insholarini avtomatlashtiring va vaqtingizni tejang!\n\n"
+        "• 🚀 Guruh a'zolari uchun cheksiz tekshiruv\n"
+        "• 📊 /report orqali to'liq Excel (.xlsx) jadval\n"
+        "• 📈 Har bir talabaning progress grafikasi\n"
+        "• 🏷 O'quv markazi brendingi\n\n"
+        "Narxi: <b>150 000 so'm / oy</b> (yoki 400 ⭐️ Stars).\n\n"
+        "Ulashingiz bilan guruhingizdagi barcha o'quvchilar erkin tekshirtira oladi!"
+    )
+    await query.message.answer(text, parse_mode="HTML", reply_markup=kb)
+    await query.answer()
 

@@ -29,8 +29,8 @@ async def handle_referral_command(message: types.Message):
 
     # Pre-filled share message for Telegram
     share_text = (
-        "Assalomu alaykum! Ushbu bot IELTS Task 2 insholarini rasmiy British Council "
-        "mezonlarida bepul tekshirib, batafsil tahlil va ball beradi. "
+        "Assalomu alaykum! Ushbu bot IELTS Task 2 insholarini rasmiy IELTS "
+        "mezonlari asosida bepul tekshirib, batafsil tahlil va ball beradi. "
         "Havola orqali kirsangiz, sizga ham bonus insho tekshiruvi beriladi:"
     )
     encoded_text = urllib.parse.quote(share_text)
@@ -88,8 +88,8 @@ async def cb_referral_menu(query: types.CallbackQuery):
     ref_link = f"https://t.me/{bot_username}?start=ref_{user.id}"
 
     share_text = (
-        "Assalomu alaykum! Ushbu bot IELTS Task 2 insholarini rasmiy British Council "
-        "mezonlarida bepul tekshirib, batafsil tahlil va ball beradi. "
+        "Assalomu alaykum! Ushbu bot IELTS Task 2 insholarini rasmiy IELTS "
+        "mezonlari asosida bepul tekshirib, batafsil tahlil va ball beradi. "
         "Havola orqali kirsangiz, sizga ham bonus insho tekshiruvi beriladi:"
     )
     encoded_text = urllib.parse.quote(share_text)

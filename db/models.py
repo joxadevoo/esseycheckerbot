@@ -57,6 +57,8 @@ class Group(Base):
     id = Column(BigInteger, primary_key=True)  # Telegram chat ID
     title = Column(String(256), nullable=True)
     is_premium = Column(Boolean, default=False)
+    added_by_user_id = Column(BigInteger, nullable=True)
+    reward_given = Column(Boolean, default=False)
     created_at = Column(DateTime, default=func.now())
 
 

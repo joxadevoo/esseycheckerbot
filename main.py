@@ -102,7 +102,7 @@ async def setup_bot_commands(bot: Bot):
 
 async def main():
     env_name = settings.model_config.get("env_file", ".env")
-    mode_name = "TEST / DEV" if "--test" in sys.argv else "PRODUCTION"
+    mode_name = "TEST / DEV" if ("--test" in sys.argv or "--dev" in sys.argv) else "PRODUCTION"
     logger.info(f"🚀 Bot ishga tushirilmoqda... Rejim: [{mode_name}] (Fayl: {env_name})")
 
     if not settings.BOT_TOKEN or settings.BOT_TOKEN == "placeholder_bot_token":

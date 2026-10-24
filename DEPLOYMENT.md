@@ -58,8 +58,8 @@ Loyiha **Supabase PostgreSQL** bilan to'liq integratsiya qilingan.
    - `OPENAI_MODEL` = `gpt-5.6-luna` (yoki `gpt-4o`)
    - `DATABASE_URL` = (Supabase PostgreSQL URL)
    - `ADMIN_IDS` = `7326292681`
-   - `DAILY_USER_LIMIT` = `5`
-   - `DAILY_GROUP_LIMIT` = `50`
+   - `DAILY_USER_LIMIT` = `1`
+   - `DAILY_GROUP_LIMIT` = `15`
 6. **Deploy** tugmasini bosing. Render portni avtomatik ochadi va `/health` tekshiruvi orqali botni onlayn ushlab turadi.
 
 ---

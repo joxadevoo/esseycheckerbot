@@ -24,8 +24,8 @@ services:
       - key: REDIS_URL
         sync: false
       - key: DAILY_USER_LIMIT
-        value: "5"
+        value: "1"
       - key: DAILY_GROUP_LIMIT
-        value: "50"
+        value: "15"
       - key: ADMIN_IDS
         value: "7326292681"

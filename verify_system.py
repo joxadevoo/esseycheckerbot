@@ -20,6 +20,7 @@ from db.database import (
     init_db,
     upsert_user,
     upsert_group,
+    record_group_addition_reward,
     check_and_increment_limits,
     get_session,
     get_group_topic,
@@ -181,10 +182,10 @@ async def run_tests():
     await upsert_user(test_user_id, "test_student", "Test Student")
     await upsert_group(test_chat_id, "IELTS Study Group")
 
-    # Verify admin user has unlimited access
-    admin_allowed, _ = await check_and_increment_limits(admin_user_id, test_chat_id, is_private=False)
-    assert admin_allowed, "Admin user limit check should always be True"
-    print("✅ Admin user (7326292681) whitelist bypass verified")
+    # Verify whitelist user has unlimited access in private chat
+    admin_allowed, _ = await check_and_increment_limits(admin_user_id, test_chat_id, is_private=True)
+    assert admin_allowed, "Admin user limit check in private chat should always be True"
+    print("✅ Whitelist user (7326292681) private chat unlimited access verified")
 
     # Reset test_user_id daily usage in DB for test repeatability
     from sqlalchemy import delete
@@ -305,6 +306,97 @@ async def run_tests():
     assert ref_stats["referral_count"] == 1
     assert ref_stats["bonus_credits_earned"] == 1
     print("✅ Referral statistics query verified (1 friend referred)")
+
+    # 4.6. Test Group Addition Reward (+3 credits) and Daily Limit (1 per day)
+    print("\n--- 4.6. Testing Group Addition Reward (+3 Credits) & 1-Daily Limit ---")
+    test_group_chat_id = -1009988776655
+    test_adder_id = 666555444
+    test_zero_cred_user = 555444333
+
+    # Clean previous test artifacts if any
+    async with get_session() as session:
+        from sqlalchemy import delete
+        from db.models import Group, DailyUsage, User
+        await session.execute(delete(DailyUsage).where(DailyUsage.target_id.in_([test_adder_id, test_zero_cred_user])))
+        await session.execute(delete(Group).where(Group.id == test_group_chat_id))
+        await session.execute(delete(User).where(User.id.in_([test_adder_id, test_zero_cred_user])))
+        await session.commit()
+
+    await upsert_user(test_adder_id, "group_adder", "Group Adder")
+
+    # Verify initial credits
+    assert await get_user_credits(test_adder_id) == 0
+
+    # A. User adds bot to a group -> gets +3 credits!
+    rewarded, new_creds = await record_group_addition_reward(
+        chat_id=test_group_chat_id, user_id=test_adder_id, group_title="IELTS Master Class"
+    )
+    assert rewarded and new_creds == 3
+    assert await get_user_credits(test_adder_id) == 3
+    print("✅ Group addition reward (+3 credits) successfully granted")
+
+    # B. Test anti-abuse duplicate addition protection (same group shouldn't reward twice)
+    rewarded_dup, dup_creds = await record_group_addition_reward(
+        chat_id=test_group_chat_id, user_id=test_adder_id, group_title="IELTS Master Class"
+    )
+    assert not rewarded_dup and dup_creds == 3
+    assert await get_user_credits(test_adder_id) == 3
+    print("✅ Group addition duplicate abuse protection verified (no double reward)")
+
+    # C. Verify DAILY_USER_LIMIT = 1 behavior
+    test_zero_cred_user = 555444333
+    await upsert_user(test_zero_cred_user, "zero_user", "Zero User")
+    async with get_session() as session:
+        await session.execute(delete(DailyUsage).where(DailyUsage.target_id == test_zero_cred_user))
+        await session.commit()
+
+    # 1st essay check should succeed (1 free per day)
+    allowed_1, _ = await check_and_increment_limits(test_zero_cred_user, test_chat_id, is_private=True)
+    assert allowed_1, "1st essay should be allowed (1 per day limit)"
+    print("✅ 1st essay check succeeded (1 per day limit)")
+
+    # 2nd essay check must be blocked because DAILY_USER_LIMIT is 1 and user has 0 extra credits
+    allowed_2, block_msg = await check_and_increment_limits(test_zero_cred_user, test_chat_id, is_private=True)
+    assert not allowed_2, "2nd essay check must be blocked when DAILY_USER_LIMIT=1"
+    assert "limitingiz (1 ta) tugadi" in block_msg or "tugadi" in block_msg
+    assert "Guruhga qo'shish" in block_msg or "+3" in block_msg
+    print("✅ 2nd essay check correctly blocked with chess-move prompt (Guruhga qo'shish / Stars / Taklif)")
+
+    # 4.7. Testing Whitelist Teacher 5-Group Limit
+    print("\n--- 4.7. Testing Whitelist Teacher 5-Group Limit ---")
+    from db.database import is_whitelist_teacher_group, get_whitelist_teacher_group_ids
+
+    test_teacher_id = 9988771122
+    await upsert_user(test_teacher_id, "test_teacher_5groups", "Test Teacher 5 Groups")
+
+    # Clean previous test roles/groups
+    async with get_session() as session:
+        from db.models import GroupMemberRole
+        test_gids = [-1009900000000 - i for i in range(1, 10)]
+        await session.execute(delete(GroupMemberRole).where(GroupMemberRole.chat_id.in_(test_gids)))
+        await session.execute(delete(Group).where(Group.id.in_(test_gids)))
+        await session.commit()
+
+    # Assign whitelist user as teacher to 5 distinct groups
+    for g_idx in range(1, 6):
+        gid = -1009900000000 - g_idx
+        await upsert_group(gid, f"Teacher Group #{g_idx}")
+        await set_group_user_role(gid, "test_teacher_5groups", role="teacher", assigned_by=test_teacher_id, user_id=test_teacher_id)
+
+    # All 5 groups should be approved under the 5-group limit
+    for g_idx in range(1, 6):
+        gid = -1009900000000 - g_idx
+        assert await is_whitelist_teacher_group(gid, teacher_id=test_teacher_id), f"Group #{g_idx} must be approved"
+    print("✅ Whitelist Teacher 5 approved groups verified")
+
+    # Now create and assign a 6th group
+    gid_6 = -1009900000006
+    await upsert_group(gid_6, "Teacher Group #6")
+    await set_group_user_role(gid_6, "test_teacher_5groups", role="teacher", assigned_by=test_teacher_id, user_id=test_teacher_id)
+
+    # The 6th group must NOT be approved under the 5-group limit
+    assert not await is_whitelist_teacher_group(gid_6, teacher_id=test_teacher_id), "6th group must NOT be approved under 5-group limit"
+    print("✅ Whitelist Teacher 5-group limit strictly enforced (6th group requires paid/Teacher Pro)")
 
     # Test GroupTopic functionality
     topic = await set_group_topic(test_chat_id, "Sample IELTS Topic Question", message_id=123, created_by=admin_user_id)

@@ -2,6 +2,7 @@ import asyncio
 import html
 import json
 import logging
+import urllib.parse
 from typing import Dict, Any, List
 from aiogram import Bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -173,6 +174,10 @@ async def process_task(bot: Bot, task: Dict[str, Any], bot_username: str):
             or feedback.get("overall")
             or feedback.get("overall_band", 6.0)
         )
+        try:
+            band_float = float(overall_band) if overall_band not in (None, "N/A", "") else 0.0
+        except (ValueError, TypeError):
+            band_float = 0.0
 
         # Step 3: Save to Database
         essay_id = await save_essay_result(
@@ -182,17 +187,56 @@ async def process_task(bot: Bot, task: Dict[str, Any], bot_username: str):
             essay_hash=essay_hash,
             text=essay_text,
             word_count=feedback.get("word_count", word_count),
-            overall_band=float(overall_band) if overall_band != "N/A" else 0.0,
+            overall_band=band_float,
             feedback_json=json.dumps(feedback, ensure_ascii=False),
         )
 
         detailed_report = format_detailed_feedback(feedback, word_count)
         chunks = split_message_text(detailed_report)
 
+        # Viral share & referral link
+        ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
+        share_text = (
+            f"Men IELTS inshoimni rasmiy mezonlarda tekshirtirdim va Band {overall_band} oldim! "
+            f"Siz ham inshoingizni bepul tekshirib ko'ring:"
+        )
+        share_url = f"https://t.me/share/url?url={urllib.parse.quote(ref_link)}&text={urllib.parse.quote(share_text)}"
+
+        pm_kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="📲 Natijani do'stlarga ulashish (+1 insho)",
+                        url=share_url,
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="👥 Guruhga qo'shish (+3 insho)",
+                        url=f"https://t.me/{bot_username}?startgroup=add",
+                    ),
+                    InlineKeyboardButton(
+                        text="💎 Balans",
+                        callback_data="buy:menu",
+                    ),
+                ],
+            ]
+        )
+
         if is_private:
-            # Direct PM: send full report chunks
-            for chunk in chunks:
-                await bot.send_message(chat_id=user_id, text=chunk, parse_mode="HTML")
+            # Direct PM: send full report chunks, attach pm_kb on last chunk
+            for i, chunk in enumerate(chunks):
+                if i == len(chunks) - 1:
+                    await bot.send_message(
+                        chat_id=user_id,
+                        text=chunk,
+                        parse_mode="HTML",
+                        reply_markup=pm_kb,
+                    )
+                else:
+                    await bot.send_message(
+                        chat_id=user_id, text=chunk, parse_mode="HTML"
+                    )
         else:
             # Group chat: send concise public badge + reply_to_message_id
             kb = InlineKeyboardMarkup(
@@ -202,7 +246,17 @@ async def process_task(bot: Bot, task: Dict[str, Any], bot_username: str):
                             text="📥 Batafsil hisobotni botda ko'rish",
                             url=f"https://t.me/{bot_username}?start=report_{essay_id}",
                         )
-                    ]
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="✍️ Insho tekshirish",
+                            url=f"https://t.me/{bot_username}?start=check",
+                        ),
+                        InlineKeyboardButton(
+                            text="👨‍🏫 Teacher Pro",
+                            url=f"https://t.me/{bot_username}?start=teacher",
+                        ),
+                    ],
                 ]
             )
 
@@ -221,10 +275,20 @@ async def process_task(bot: Bot, task: Dict[str, Any], bot_username: str):
                 reply_markup=kb,
             )
 
-            # Also attempt to send directly to student's PM
+            # Also attempt to send directly to student's PM with viral share kb
             try:
-                for chunk in chunks:
-                    await bot.send_message(chat_id=user_id, text=chunk, parse_mode="HTML")
+                for i, chunk in enumerate(chunks):
+                    if i == len(chunks) - 1:
+                        await bot.send_message(
+                            chat_id=user_id,
+                            text=chunk,
+                            parse_mode="HTML",
+                            reply_markup=pm_kb,
+                        )
+                    else:
+                        await bot.send_message(
+                            chat_id=user_id, text=chunk, parse_mode="HTML"
+                        )
             except Exception as pm_err:
                 logger.warning(
                     f"Could not send PM to user {user_id} (bot might not be started by user): {pm_err}"

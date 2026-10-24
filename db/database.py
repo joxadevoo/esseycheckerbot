@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta
 from contextlib import asynccontextmanager
 from typing import Optional, Tuple
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy import select, and_, func
+from sqlalchemy import select, and_, func, or_
 
 from config import settings
 from db.models import Base, User, Group, GroupMember, Essay, DailyUsage, GroupTopic, GroupMemberRole, Referral, Payment, Feedback
@@ -38,9 +38,17 @@ async def init_db():
                     await conn.execute(text("ALTER TABLE users ADD COLUMN extra_credits INTEGER DEFAULT 0 NOT NULL;"))
                 if "referral_count" not in cols:
                     await conn.execute(text("ALTER TABLE users ADD COLUMN referral_count INTEGER DEFAULT 0 NOT NULL;"))
+                res_g = await conn.execute(text("PRAGMA table_info(groups);"))
+                cols_g = [r[1] for r in res_g.fetchall()]
+                if "added_by_user_id" not in cols_g:
+                    await conn.execute(text("ALTER TABLE groups ADD COLUMN added_by_user_id BIGINT;"))
+                if "reward_given" not in cols_g:
+                    await conn.execute(text("ALTER TABLE groups ADD COLUMN reward_given BOOLEAN DEFAULT FALSE;"))
             else:
                 await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS extra_credits INTEGER DEFAULT 0 NOT NULL;"))
                 await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_count INTEGER DEFAULT 0 NOT NULL;"))
+                await conn.execute(text("ALTER TABLE groups ADD COLUMN IF NOT EXISTS added_by_user_id BIGINT;"))
+                await conn.execute(text("ALTER TABLE groups ADD COLUMN IF NOT EXISTS reward_given BOOLEAN DEFAULT FALSE;"))
         except Exception as ex:
             logger.warning(f"Database migration notice: {ex}")
     logger.info("Database initialized successfully.")
@@ -78,6 +86,56 @@ async def upsert_group(chat_id: int, title: Optional[str]):
         else:
             group.title = title
         await session.commit()
+
+
+async def record_group_addition_reward(
+    chat_id: int, user_id: int, group_title: Optional[str] = None
+) -> Tuple[bool, int]:
+    """
+    Rewards a user with +3 extra credits when they add the bot to a new group.
+    Returns (reward_given: bool, new_total_credits: int).
+    """
+    async with get_session() as session:
+        group = await session.get(Group, chat_id)
+        should_reward = False
+        if not group:
+            group = Group(
+                id=chat_id,
+                title=group_title,
+                added_by_user_id=user_id,
+                reward_given=True,
+            )
+            session.add(group)
+            should_reward = True
+        else:
+            if group_title:
+                group.title = group_title
+            if not group.reward_given:
+                group.added_by_user_id = user_id
+                group.reward_given = True
+                should_reward = True
+
+        new_credits = 0
+        if should_reward and user_id:
+            user = await session.get(User, user_id)
+            if not user:
+                user = User(id=user_id, extra_credits=3)
+                session.add(user)
+                new_credits = 3
+            else:
+                user.extra_credits += 3
+                new_credits = user.extra_credits
+            await session.commit()
+            logger.info(
+                f"User {user_id} rewarded +3 extra credits for adding bot to group {chat_id} ({group_title}). Total: {new_credits}"
+            )
+            return True, new_credits
+        else:
+            await session.commit()
+            if user_id:
+                user = await session.get(User, user_id)
+                new_credits = user.extra_credits if user else 0
+            return False, new_credits
 
 
 async def upsert_group_member(
@@ -271,23 +329,178 @@ async def get_user_referral_stats(user_id: int) -> dict:
 
 
 
+async def get_whitelist_teacher_group_ids(teacher_id: Optional[int] = None) -> list[int]:
+    """
+    Returns the list of chat_ids (up to WHITELIST_MAX_GROUPS, default 5)
+    where a whitelisted user is designated as teacher, added the bot, or created topics.
+    Ordered chronologically by when the group was associated.
+    """
+    if teacher_id is not None:
+        whitelist_ids = [teacher_id]
+    else:
+        whitelist_ids = list(settings.get_whitelist_user_ids())
+
+    if not whitelist_ids:
+        return []
+
+    async with get_session() as session:
+        # Find usernames for these whitelist user IDs
+        stmt_users = select(User.username).where(User.id.in_(whitelist_ids))
+        res_u = await session.execute(stmt_users)
+        whitelist_usernames = [u.lower() for u in res_u.scalars().all() if u]
+
+        conditions = [GroupMemberRole.user_id.in_(whitelist_ids)]
+        if whitelist_usernames:
+            conditions.append(func.lower(GroupMemberRole.username).in_(whitelist_usernames))
+
+        # 1. Groups from GroupMemberRole (role in teacher/admin)
+        stmt_roles = (
+            select(GroupMemberRole.chat_id, GroupMemberRole.created_at)
+            .where(
+                and_(
+                    GroupMemberRole.role.in_(["teacher", "admin"]),
+                    or_(*conditions),
+                )
+            )
+            .order_by(GroupMemberRole.created_at.asc())
+        )
+        res_r = await session.execute(stmt_roles)
+        role_groups = res_r.all()
+
+        # 2. Groups where whitelist user added the bot
+        stmt_added = (
+            select(Group.id, Group.created_at)
+            .where(Group.added_by_user_id.in_(whitelist_ids))
+            .order_by(Group.created_at.asc())
+        )
+        res_a = await session.execute(stmt_added)
+        added_groups = res_a.all()
+
+        # 3. Groups where whitelist user created a topic
+        stmt_topics = (
+            select(GroupTopic.chat_id, GroupTopic.created_at)
+            .where(GroupTopic.created_by.in_(whitelist_ids))
+            .order_by(GroupTopic.created_at.asc())
+        )
+        res_t = await session.execute(stmt_topics)
+        topic_groups = res_t.all()
+
+        # Combine and order chronologically
+        all_groups = []
+        seen = set()
+        for gid, dt in sorted(role_groups + added_groups + topic_groups, key=lambda x: x[1] or datetime.min):
+            if gid not in seen:
+                seen.add(gid)
+                all_groups.append(gid)
+
+        return all_groups[: settings.WHITELIST_MAX_GROUPS]
+
+
+async def is_whitelist_teacher_group(chat_id: int, teacher_id: Optional[int] = None) -> bool:
+    """Checks if chat_id is one of the allowed (max 5) whitelist teacher groups."""
+    allowed_groups = await get_whitelist_teacher_group_ids(teacher_id=teacher_id)
+    return chat_id in allowed_groups
+
+
 async def check_and_increment_limits(
     user_id: int, chat_id: int, is_private: bool
 ) -> Tuple[bool, str]:
     """
-    Checks user and group daily limits. If daily limit reached, checks extra_credits.
-    Admin users have unlimited access.
+    Checks user and group daily limits:
+    - Shaxsiy chatda (is_private=True):
+      Whitelist user uchun limitsiz (cheksiz).
+      Boshqa foydalanuvchilar uchun 1 ta bepul/kun + pullik tizim (Stars/Referral/Guruh).
+    - Guruhda (is_private=False):
+      Whitelist ustoz uchun bot tomonidan belgilangan maksimal 5 ta guruh limiti bor.
+      Shu 5 ta guruhda insholar cheksiz tekshiriladi.
+      6-guruh va boshqa barcha guruhlar esa oddiy pullik tizimga o'tadi
+      (guruh limiti 15 ta, user limiti 1 ta, yoki Teacher Pro).
     Returns (is_allowed: bool, reason: str).
     """
-    # Exemption for admin / test user
-    if settings.is_admin(user_id):
-        logger.info(f"User {user_id} is ADMIN/WHITELISTED — limits completely bypassed.")
-        return True, "OK"
-
     today = date.today()
 
+    # 1. Shaxsiy chat tekshiruvi
+    if is_private:
+        if settings.is_whitelist_user(user_id):
+            logger.info(f"User {user_id} is WHITELISTED in private chat — unlimited access.")
+            return True, "OK"
+
+        # Oddiy foydalanuvchi shaxsiy limit (1 ta bepul)
+        async with get_session() as session:
+            stmt_user = select(DailyUsage).where(
+                and_(
+                    DailyUsage.target_type == "user",
+                    DailyUsage.target_id == user_id,
+                    DailyUsage.usage_date == today,
+                )
+            )
+            res_u = await session.execute(stmt_user)
+            user_usage = res_u.scalar_one_or_none()
+            current_user_count = user_usage.count if user_usage else 0
+
+            used_extra_credit = False
+            if current_user_count >= settings.DAILY_USER_LIMIT:
+                user = await session.get(User, user_id)
+                if user and user.extra_credits > 0:
+                    user.extra_credits -= 1
+                    used_extra_credit = True
+                    logger.info(f"User {user_id} used 1 extra credit. Remaining: {user.extra_credits}")
+                else:
+                    return (
+                        False,
+                        f"Sizning bugungi bepul limitingiz ({settings.DAILY_USER_LIMIT} ta) tugadi.\n\n"
+                        f"Insholarni tekshirishni davom ettirish uchun o'zingizga qulay yo'lni tanlang:\n\n"
+                        f"⭐️ <b>Sotib olish:</b> Telegram Stars orqali qo'shimcha insholar xarid qiling\n"
+                        f"👥 <b>Guruhga qo'shish:</b> Botni IELTS guruhiga qo'shing va darhol <b>+3 ta bepul insho</b> yuting!\n"
+                        f"🎁 <b>Do'st taklif qilish:</b> Har bir taklif qilingan do'st uchun <b>+1 ta bepul insho</b> oling!",
+                    )
+
+            if not used_extra_credit:
+                if not user_usage:
+                    user_usage = DailyUsage(
+                        target_type="user", target_id=user_id, usage_date=today, count=1
+                    )
+                    session.add(user_usage)
+                else:
+                    user_usage.count += 1
+            await session.commit()
+            return True, "OK"
+
+    # 2. Guruh chat tekshiruvi
+    # Whitelist ustozning tasdiqlangan 5 ta guruhi bormi?
+    if await is_whitelist_teacher_group(chat_id):
+        logger.info(f"Group {chat_id} is an approved Whitelist Teacher Group (within {settings.WHITELIST_MAX_GROUPS} groups limit) — access granted.")
+        return True, "OK"
+
+    # Guruh 5 ta ustoz guruhi ichida emas -> "qolgani ustozmi oddiy usermi farqi yo'q pullikga o'tadi"
     async with get_session() as session:
-        # 1. Check user limit
+        # Guruh limitini tekshirish (15 ta)
+        stmt_group = select(DailyUsage).where(
+            and_(
+                DailyUsage.target_type == "group",
+                DailyUsage.target_id == chat_id,
+                DailyUsage.usage_date == today,
+            )
+        )
+        res_g = await session.execute(stmt_group)
+        group_usage = res_g.scalar_one_or_none()
+        current_group_count = group_usage.count if group_usage else 0
+
+        group = await session.get(Group, chat_id)
+        group_limit = (
+            settings.DAILY_GROUP_LIMIT * 5
+            if (group and group.is_premium)
+            else settings.DAILY_GROUP_LIMIT
+        )
+
+        if current_group_count >= group_limit:
+            return (
+                False,
+                f"Ushbu guruhning kunlik bepul tekshirish limiti ({group_limit} ta) tugadi.\n\n"
+                f"Ertaga yangi bepul limit beriladi yoki guruh administratori <b>/teacher</b> buyrug'i orqali cheksiz Teacher Pro obunasini faollashtirishi mumkin!",
+            )
+
+        # Guruh ichidagi foydalanuvchi limitini tekshirish
         stmt_user = select(DailyUsage).where(
             and_(
                 DailyUsage.target_type == "user",
@@ -295,64 +508,37 @@ async def check_and_increment_limits(
                 DailyUsage.usage_date == today,
             )
         )
-        result_user = await session.execute(stmt_user)
-        user_usage = result_user.scalar_one_or_none()
+        res_u = await session.execute(stmt_user)
+        user_usage = res_u.scalar_one_or_none()
         current_user_count = user_usage.count if user_usage else 0
 
         used_extra_credit = False
         if current_user_count >= settings.DAILY_USER_LIMIT:
-            # Check if user has extra credits purchased via Telegram Stars
             user = await session.get(User, user_id)
             if user and user.extra_credits > 0:
                 user.extra_credits -= 1
                 used_extra_credit = True
-                logger.info(f"User {user_id} used 1 extra credit. Remaining: {user.extra_credits}")
+                logger.info(f"User {user_id} used 1 extra credit in group {chat_id}. Remaining: {user.extra_credits}")
             else:
                 return (
                     False,
                     f"Sizning bugungi bepul limitingiz ({settings.DAILY_USER_LIMIT} ta) tugadi.\n\n"
-                    f"Tekshirishni davom ettirish uchun o'zingizga ma'qul yo'lni tanlang:\n"
-                    f"⭐️ <b>Sotib olish:</b> Telegram Yulduzlari (Stars) orqali qo'shimcha insholar xarid qiling\n"
-                    f"🎁 <b>Do'st taklif qilish:</b> Do'stlaringizni taklif qiling va har bir do'stingiz uchun <b>+1 ta bepul insho</b> oling!",
+                    f"Insholarni tekshirishni davom ettirish uchun o'zingizga qulay yo'lni tanlang:\n\n"
+                    f"⭐️ <b>Sotib olish:</b> Telegram Stars orqali qo'shimcha insholar xarid qiling\n"
+                    f"👥 <b>Guruhga qo'shish:</b> Botni IELTS guruhiga qo'shing va darhol <b>+3 ta bepul insho</b> yuting!\n"
+                    f"🎁 <b>Do'st taklif qilish:</b> Har bir taklif qilingan do'st uchun <b>+1 ta bepul insho</b> oling!",
                 )
 
-        # 2. If in a group, check group limit
-        if not is_private:
-            stmt_group = select(DailyUsage).where(
-                and_(
-                    DailyUsage.target_type == "group",
-                    DailyUsage.target_id == chat_id,
-                    DailyUsage.usage_date == today,
-                )
+        # Increment group usage
+        if not group_usage:
+            group_usage = DailyUsage(
+                target_type="group", target_id=chat_id, usage_date=today, count=1
             )
-            result_group = await session.execute(stmt_group)
-            group_usage = result_group.scalar_one_or_none()
-            current_group_count = group_usage.count if group_usage else 0
+            session.add(group_usage)
+        else:
+            group_usage.count += 1
 
-            # Check if group is premium
-            group = await session.get(Group, chat_id)
-            group_limit = (
-                settings.DAILY_GROUP_LIMIT * 5
-                if (group and group.is_premium)
-                else settings.DAILY_GROUP_LIMIT
-            )
-
-            if current_group_count >= group_limit:
-                return (
-                    False,
-                    f"Ushbu guruhning kunlik bepul tekshirish limiti ({group_limit} ta) tugadi. Ertaga qayta urinib ko'ring yoki Premium obunani faollashtiring!",
-                )
-
-            # Increment group usage
-            if not group_usage:
-                group_usage = DailyUsage(
-                    target_type="group", target_id=chat_id, usage_date=today, count=1
-                )
-                session.add(group_usage)
-            else:
-                group_usage.count += 1
-
-        # Increment user daily usage (if not using extra credits)
+        # Increment user usage
         if not used_extra_credit:
             if not user_usage:
                 user_usage = DailyUsage(
@@ -463,6 +649,13 @@ async def set_group_user_role(
     """Assigns or updates a role (teacher/admin) for a username in a group."""
     clean_username = username.strip().lstrip("@").lower()
     async with get_session() as session:
+        if not user_id:
+            stmt_u = select(User.id).where(func.lower(User.username) == clean_username)
+            res_u = await session.execute(stmt_u)
+            found_uid = res_u.scalar_one_or_none()
+            if found_uid:
+                user_id = found_uid
+
         stmt = select(GroupMemberRole).where(
             and_(
                 GroupMemberRole.chat_id == chat_id,

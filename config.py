@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 env_file_path = os.getenv("ENV_FILE", ".env")
-if "--test" in sys.argv:
+if "--test" in sys.argv or "--dev" in sys.argv:
     env_file_path = ".env.test"
 elif "--env" in sys.argv:
     try:
@@ -28,8 +28,8 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///bot.db"
     REDIS_URL: Optional[str] = None
 
-    DAILY_USER_LIMIT: int = 5
-    DAILY_GROUP_LIMIT: int = 50
+    DAILY_USER_LIMIT: int = 1
+    DAILY_GROUP_LIMIT: int = 15
     CACHE_TTL_SECONDS: int = 86400  # 24 hours
 
     WEBHOOK_URL: Optional[str] = None
@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     # Dedicated real developer / admin ID (for feedback & collaboration inquiries)
     DEVELOPER_CHAT_ID: int = 7326292681
 
+    # Whitelisted User (Shaxsiyda cheksiz insho tekshirish, guruhlarda max 5 ta guruh limiti)
+    WHITELIST: Optional[str] = None
+    WHITELIST_USER_ID: Optional[int] = None
+    WHITELIST_ID: Optional[int] = None
+    WHITELIST_MAX_GROUPS: int = 5
     ADMIN_IDS: str = ""
 
     model_config = SettingsConfigDict(
@@ -48,9 +53,29 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    def get_whitelist_user_ids(self) -> set[int]:
+        ids = set()
+        if self.WHITELIST_USER_ID:
+            ids.add(self.WHITELIST_USER_ID)
+        if self.WHITELIST_ID:
+            ids.add(self.WHITELIST_ID)
+        if self.WHITELIST:
+            for part in str(self.WHITELIST).split(","):
+                if part.strip().isdigit():
+                    ids.add(int(part.strip()))
+        if self.ADMIN_IDS:
+            for part in str(self.ADMIN_IDS).split(","):
+                if part.strip().isdigit():
+                    ids.add(int(part.strip()))
+        if self.DEVELOPER_CHAT_ID:
+            ids.add(self.DEVELOPER_CHAT_ID)
+        return ids
+
+    def is_whitelist_user(self, user_id: int) -> bool:
+        return user_id in self.get_whitelist_user_ids()
+
     def is_admin(self, user_id: int) -> bool:
-        admin_list = [int(i.strip()) for i in self.ADMIN_IDS.split(",") if i.strip().isdigit()]
-        return user_id in admin_list
+        return self.is_whitelist_user(user_id)
 
 
 settings = Settings()

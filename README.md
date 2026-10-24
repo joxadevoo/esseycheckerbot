@@ -44,8 +44,8 @@ DATABASE_URL=sqlite+aiosqlite:///bot.db
 REDIS_URL=
 
 # Cheklovlar
-DAILY_USER_LIMIT=5
-DAILY_GROUP_LIMIT=50
+DAILY_USER_LIMIT=1
+DAILY_GROUP_LIMIT=15
 ```
 
 ### 4. Tizim Testlarini Tekshirish

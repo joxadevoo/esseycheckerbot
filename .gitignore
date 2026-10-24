@@ -27,4 +27,6 @@ env/
 *.log
 .DS_Store
 Thumbs.db
+# OS artifacts & Standalone repos
+landing/
 ~$*
