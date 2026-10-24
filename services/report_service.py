@@ -306,12 +306,12 @@ def generate_report_chart(data: Dict[str, Any]) -> bytes:
     # Add score and trend labels onto bars
     for bar, st in zip(bars, display_students):
         width = bar.get_width()
-        trend_str = ""
-        if st["trend"] == "up":
-            trend_str = f" (+{st['delta']}) [up]"
-        elif st["trend"] == "down":
-            trend_str = f" ({st['delta']}) [down]"
-        elif st["trend"] == "same":
+        trend_val = st.get("trend")
+        if trend_val == "up":
+            trend_str = f" (+{st.get('delta', 0.0)}) [up]"
+        elif trend_val == "down":
+            trend_str = f" ({st.get('delta', 0.0)}) [down]"
+        elif trend_val == "same":
             trend_str = " (0.0)"
         else:
             trend_str = " [new]"
@@ -379,7 +379,9 @@ def generate_report_excel(data: Dict[str, Any]) -> bytes:
     # Title block
     worksheet.write("A1", "IELTS Task 2: O'quvchilar Natijalari Hisoboti", title_fmt)
     worksheet.write("A2", f"Mavzu: {data.get('topic_text', '')}", subtitle_fmt)
-    worksheet.write("A3", f"Topshirganlar: {data['submitted_count']} / Jami: {data['total_members']} ta", subtitle_fmt)
+    sub_cnt = data.get("submitted_count", len(data.get("students", [])))
+    tot_mem = data.get("total_members", len(data.get("students", [])))
+    worksheet.write("A3", f"Topshirganlar: {sub_cnt} / Jami: {tot_mem} ta", subtitle_fmt)
 
     # Headers
     headers = [
@@ -405,23 +407,26 @@ def generate_report_excel(data: Dict[str, Any]) -> bytes:
     row_idx = 5
     for idx, s in enumerate(students):
         worksheet.write(row_idx, 0, idx + 1, cell_center)
-        worksheet.write(row_idx, 1, s["full_name"], cell_left)
-        worksheet.write(row_idx, 2, f"@{s['username']}" if s["username"] else "-", cell_left)
-        time_str = s["created_at"].strftime("%Y-%m-%d %H:%M") if s["created_at"] else "-"
+        worksheet.write(row_idx, 1, s.get("full_name", "-"), cell_left)
+        worksheet.write(row_idx, 2, f"@{s.get('username')}" if s.get("username") else "-", cell_left)
+        created_at_val = s.get("created_at")
+        time_str = created_at_val.strftime("%Y-%m-%d %H:%M") if hasattr(created_at_val, "strftime") else "-"
         worksheet.write(row_idx, 3, time_str, cell_center)
-        _write_num_cell(row_idx, 4, s["word_count"], cell_int_num, cell_center)
-        _write_num_cell(row_idx, 5, s["tr"], cell_score_num, cell_center)
-        _write_num_cell(row_idx, 6, s["cc"], cell_score_num, cell_center)
-        _write_num_cell(row_idx, 7, s["lr"], cell_score_num, cell_center)
-        _write_num_cell(row_idx, 8, s["gra"], cell_score_num, cell_center)
-        _write_num_cell(row_idx, 9, s["overall"], cell_overall_num, cell_center)
+        _write_num_cell(row_idx, 4, s.get("word_count", 0), cell_int_num, cell_center)
+        _write_num_cell(row_idx, 5, s.get("tr", "-"), cell_score_num, cell_center)
+        _write_num_cell(row_idx, 6, s.get("cc", "-"), cell_score_num, cell_center)
+        _write_num_cell(row_idx, 7, s.get("lr", "-"), cell_score_num, cell_center)
+        _write_num_cell(row_idx, 8, s.get("gra", "-"), cell_score_num, cell_center)
+        _write_num_cell(row_idx, 9, s.get("overall", 0.0), cell_overall_num, cell_center)
 
         # Dinamika formatting
-        if s["trend"] == "up":
-            worksheet.write(row_idx, 10, f"+{s['delta']} (O'sish)", up_fmt)
-        elif s["trend"] == "down":
-            worksheet.write(row_idx, 10, f"{s['delta']} (Pasayish)", down_fmt)
-        elif s["trend"] == "same":
+        trend = s.get("trend")
+        delta = s.get("delta", 0.0)
+        if trend == "up":
+            worksheet.write(row_idx, 10, f"+{delta} (O'sish)", up_fmt)
+        elif trend == "down":
+            worksheet.write(row_idx, 10, f"{delta} (Pasayish)", down_fmt)
+        elif trend == "same":
             worksheet.write(row_idx, 10, "0.0 (O'zgarishsiz)", cell_center)
         else:
             worksheet.write(row_idx, 10, "Ilk insho", cell_center)
