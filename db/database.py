@@ -1,9 +1,11 @@
+import io
 import logging
 from datetime import date, datetime, timedelta
 from contextlib import asynccontextmanager
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict, Any
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy import select, and_, func, or_
+from sqlalchemy import select, and_, func, or_, desc
+import xlsxwriter
 
 from config import settings
 from db.models import Base, User, Group, GroupMember, Essay, DailyUsage, GroupTopic, GroupMemberRole, Referral, Payment, Feedback
@@ -910,3 +912,278 @@ async def mark_feedback_answered(feedback_id: int, reply_text: str):
             fb.reply_text = reply_text
             fb.replied_at = func.now()
             await session.commit()
+
+
+async def get_system_admin_stats() -> dict:
+    """Fetches high-level usage, user, essay, group, referral, and financial statistics for administrators."""
+    async with get_session() as session:
+        # Users
+        total_users = (await session.execute(select(func.count(User.id)))).scalar() or 0
+        total_credits = (await session.execute(select(func.sum(User.extra_credits)))).scalar() or 0
+
+        # Groups
+        total_groups = (await session.execute(select(func.count(Group.id)))).scalar() or 0
+        premium_groups = (await session.execute(select(func.count(Group.id)).where(Group.is_premium == True))).scalar() or 0
+
+        # Essays
+        total_essays = (await session.execute(select(func.count(Essay.id)))).scalar() or 0
+        avg_band = (await session.execute(select(func.avg(Essay.overall_band)))).scalar() or 0.0
+
+        # Time-based filters
+        now = datetime.now()
+        today = date.today()
+        today_start = datetime.combine(today, datetime.min.time())
+        seven_days_ago = now - timedelta(days=7)
+        thirty_days_ago = now - timedelta(days=30)
+
+        today_essays = (await session.execute(select(func.count(Essay.id)).where(Essay.created_at >= today_start))).scalar() or 0
+        week_essays = (await session.execute(select(func.count(Essay.id)).where(Essay.created_at >= seven_days_ago))).scalar() or 0
+        month_essays = (await session.execute(select(func.count(Essay.id)).where(Essay.created_at >= thirty_days_ago))).scalar() or 0
+
+        # Unique active writers
+        unique_writers = (await session.execute(select(func.count(func.distinct(Essay.user_id))))).scalar() or 0
+
+        # Active users today
+        active_today_users = (await session.execute(
+            select(func.count(DailyUsage.id)).where(DailyUsage.target_type == "user", DailyUsage.usage_date == today)
+        )).scalar() or 0
+
+        # Referrals
+        total_referrals = (await session.execute(select(func.count(Referral.id)))).scalar() or 0
+
+        # Payments & Stars
+        total_payments = (await session.execute(select(func.count(Payment.id)))).scalar() or 0
+        total_stars = (await session.execute(select(func.sum(Payment.stars_amount)))).scalar() or 0
+        total_paid_essays = (await session.execute(select(func.sum(Payment.essays_count)))).scalar() or 0
+
+        # Feedbacks
+        total_feedback = (await session.execute(select(func.count(Feedback.id)))).scalar() or 0
+        pending_feedback = (await session.execute(select(func.count(Feedback.id)).where(Feedback.status == "pending"))).scalar() or 0
+
+        # Band score distribution
+        bands = {}
+        for b in [5.0, 5.5, 6.0, 6.5, 7.0, 7.5, 8.0, 8.5, 9.0]:
+            count = (await session.execute(
+                select(func.count(Essay.id)).where(Essay.overall_band >= b, Essay.overall_band < b + 0.5)
+            )).scalar() or 0
+            if count > 0:
+                bands[str(b)] = count
+
+        # Top 10 most active users
+        stmt_top_users = (
+            select(
+                User.id,
+                User.username,
+                User.full_name,
+                User.extra_credits,
+                User.referral_count,
+                func.count(Essay.id).label("essay_count"),
+                func.max(Essay.overall_band).label("best_band"),
+                func.avg(Essay.overall_band).label("avg_band")
+            )
+            .outerjoin(Essay, User.id == Essay.user_id)
+            .group_by(User.id)
+            .order_by(desc("essay_count"))
+            .limit(10)
+        )
+        top_users_raw = (await session.execute(stmt_top_users)).all()
+        top_users = []
+        for u in top_users_raw:
+            top_users.append({
+                "id": u.id,
+                "username": u.username,
+                "full_name": u.full_name or "Nomsiz",
+                "essay_count": u.essay_count,
+                "extra_credits": u.extra_credits,
+                "referral_count": u.referral_count,
+                "best_band": round(u.best_band, 1) if u.best_band else None,
+                "avg_band": round(u.avg_band, 1) if u.avg_band else None,
+            })
+
+        # Top 10 groups
+        stmt_top_groups = (
+            select(
+                Group.id,
+                Group.title,
+                func.count(Essay.id).label("essay_count")
+            )
+            .outerjoin(Essay, Group.id == Essay.chat_id)
+            .group_by(Group.id)
+            .order_by(desc("essay_count"))
+            .limit(10)
+        )
+        top_groups_raw = (await session.execute(stmt_top_groups)).all()
+        top_groups = []
+        for g in top_groups_raw:
+            top_groups.append({
+                "id": g.id,
+                "title": g.title or f"Guruh #{g.id}",
+                "essay_count": g.essay_count,
+            })
+
+        # Recent 5 essays
+        stmt_recent_essays = (
+            select(Essay.id, Essay.user_id, Essay.overall_band, Essay.word_count, Essay.created_at)
+            .order_by(desc(Essay.created_at))
+            .limit(5)
+        )
+        recent_essays_raw = (await session.execute(stmt_recent_essays)).all()
+        recent_essays = []
+        for e in recent_essays_raw:
+            recent_essays.append({
+                "id": e.id,
+                "user_id": e.user_id,
+                "overall_band": e.overall_band,
+                "word_count": e.word_count,
+                "created_at": e.created_at,
+            })
+
+        return {
+            "total_users": total_users,
+            "unique_writers": unique_writers,
+            "active_today_users": active_today_users,
+            "total_credits": total_credits,
+            "total_groups": total_groups,
+            "premium_groups": premium_groups,
+            "total_essays": total_essays,
+            "today_essays": today_essays,
+            "week_essays": week_essays,
+            "month_essays": month_essays,
+            "avg_band": round(avg_band, 2),
+            "total_referrals": total_referrals,
+            "total_payments": total_payments,
+            "total_stars": total_stars,
+            "total_paid_essays": total_paid_essays,
+            "total_feedback": total_feedback,
+            "pending_feedback": pending_feedback,
+            "bands_distribution": bands,
+            "top_users": top_users,
+            "top_groups": top_groups,
+            "recent_essays": recent_essays,
+        }
+
+
+async def export_users_and_essays_excel() -> io.BytesIO:
+    """Generates an Excel workbook containing all registered users, groups, and essays."""
+    output = io.BytesIO()
+    workbook = xlsxwriter.Workbook(output, {"in_memory": True})
+
+    # Formats
+    header_fmt = workbook.add_format({
+        "bold": True,
+        "bg_color": "#1e3a8a",
+        "font_color": "#ffffff",
+        "align": "center",
+        "valign": "vcenter",
+        "border": 1,
+    })
+    cell_center = workbook.add_format({"align": "center", "valign": "vcenter", "border": 1})
+    cell_left = workbook.add_format({"align": "left", "valign": "vcenter", "border": 1})
+    cell_score = workbook.add_format({"align": "center", "valign": "vcenter", "border": 1, "num_format": "0.0"})
+    cell_int = workbook.add_format({"align": "center", "valign": "vcenter", "border": 1, "num_format": "#,##0"})
+
+    async with get_session() as session:
+        # Sheet 1: Foydalanuvchilar
+        ws_users = workbook.add_worksheet("Foydalanuvchilar")
+        headers_u = ["ID", "F.I.SH", "Username", "Insholar Soni", "O'rtacha Band", "Eng Yuqori Band", "Kreditlar", "Referallar", "Qo'shilgan Sana"]
+        for c, h in enumerate(headers_u):
+            ws_users.write(0, c, h, header_fmt)
+
+        stmt_users = (
+            select(
+                User.id,
+                User.full_name,
+                User.username,
+                User.extra_credits,
+                User.referral_count,
+                User.created_at,
+                func.count(Essay.id).label("essay_count"),
+                func.avg(Essay.overall_band).label("avg_band"),
+                func.max(Essay.overall_band).label("best_band")
+            )
+            .outerjoin(Essay, User.id == Essay.user_id)
+            .group_by(User.id)
+            .order_by(desc("essay_count"))
+        )
+        users = (await session.execute(stmt_users)).all()
+        for r, u in enumerate(users, 1):
+            ws_users.write(r, 0, u.id, cell_center)
+            ws_users.write(r, 1, u.full_name or "Nomsiz", cell_left)
+            ws_users.write(r, 2, f"@{u.username}" if u.username else "-", cell_left)
+            ws_users.write(r, 3, u.essay_count or 0, cell_int)
+            if u.avg_band:
+                ws_users.write(r, 4, round(u.avg_band, 1), cell_score)
+            else:
+                ws_users.write(r, 4, "-", cell_center)
+            if u.best_band:
+                ws_users.write(r, 5, round(u.best_band, 1), cell_score)
+            else:
+                ws_users.write(r, 5, "-", cell_center)
+            ws_users.write(r, 6, u.extra_credits or 0, cell_int)
+            ws_users.write(r, 7, u.referral_count or 0, cell_int)
+            date_str = u.created_at.strftime("%Y-%m-%d %H:%M") if hasattr(u.created_at, "strftime") else "-"
+            ws_users.write(r, 8, date_str, cell_center)
+
+        ws_users.set_column(0, 0, 14)
+        ws_users.set_column(1, 1, 24)
+        ws_users.set_column(2, 2, 18)
+        ws_users.set_column(3, 7, 14)
+        ws_users.set_column(8, 8, 18)
+
+        # Sheet 2: Guruhlar
+        ws_groups = workbook.add_worksheet("Guruhlar")
+        headers_g = ["Chat ID", "Guruh Nomi", "Insholar Soni", "Premium", "Qo'shilgan Sana"]
+        for c, h in enumerate(headers_g):
+            ws_groups.write(0, c, h, header_fmt)
+
+        stmt_groups = (
+            select(
+                Group.id,
+                Group.title,
+                Group.is_premium,
+                Group.created_at,
+                func.count(Essay.id).label("essay_count")
+            )
+            .outerjoin(Essay, Group.id == Essay.chat_id)
+            .group_by(Group.id)
+            .order_by(desc("essay_count"))
+        )
+        groups = (await session.execute(stmt_groups)).all()
+        for r, g in enumerate(groups, 1):
+            ws_groups.write(r, 0, g.id, cell_center)
+            ws_groups.write(r, 1, g.title or f"Guruh #{g.id}", cell_left)
+            ws_groups.write(r, 2, g.essay_count or 0, cell_int)
+            ws_groups.write(r, 3, "Ha" if g.is_premium else "Yo'q", cell_center)
+            date_str = g.created_at.strftime("%Y-%m-%d %H:%M") if hasattr(g.created_at, "strftime") else "-"
+            ws_groups.write(r, 4, date_str, cell_center)
+
+        ws_groups.set_column(0, 0, 16)
+        ws_groups.set_column(1, 1, 28)
+        ws_groups.set_column(2, 3, 14)
+        ws_groups.set_column(4, 4, 18)
+
+        # Sheet 3: So'nggi insholar (oxirgi 500 ta)
+        ws_essays = workbook.add_worksheet("Insholar")
+        headers_e = ["ID", "User ID", "Guruh ID", "Overall Band", "So'zlar Soni", "Sana"]
+        for c, h in enumerate(headers_e):
+            ws_essays.write(0, c, h, header_fmt)
+
+        stmt_essays = select(Essay).order_by(desc(Essay.created_at)).limit(500)
+        essays = (await session.execute(stmt_essays)).scalars().all()
+        for r, e in enumerate(essays, 1):
+            ws_essays.write(r, 0, e.id, cell_center)
+            ws_essays.write(r, 1, e.user_id, cell_center)
+            ws_essays.write(r, 2, e.chat_id, cell_center)
+            ws_essays.write(r, 3, e.overall_band or 0.0, cell_score)
+            ws_essays.write(r, 4, e.word_count or 0, cell_int)
+            date_str = e.created_at.strftime("%Y-%m-%d %H:%M") if hasattr(e.created_at, "strftime") else "-"
+            ws_essays.write(r, 5, date_str, cell_center)
+
+        ws_essays.set_column(0, 2, 16)
+        ws_essays.set_column(3, 4, 14)
+        ws_essays.set_column(5, 5, 18)
+
+    workbook.close()
+    output.seek(0)
+    return output
+

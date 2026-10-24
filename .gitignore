@@ -29,4 +29,6 @@ env/
 Thumbs.db
 # OS artifacts & Standalone repos
 landing/
+graphify-out/
+scratch/
 ~$*

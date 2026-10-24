@@ -26,6 +26,7 @@ from handlers.messages import router
 from handlers.payments import payments_router
 from handlers.referral import referral_router
 from handlers.feedback import feedback_router
+from handlers.admin import admin_router
 from services.worker import start_worker
 
 logging.basicConfig(
@@ -119,6 +120,7 @@ async def main():
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher()
+    dp.include_router(admin_router)
     dp.include_router(feedback_router)
     dp.include_router(payments_router)
     dp.include_router(referral_router)
