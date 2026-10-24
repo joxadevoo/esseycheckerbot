@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     WHITELIST_USER_ID: Optional[int] = None
     WHITELIST_ID: Optional[int] = None
     WHITELIST_MAX_GROUPS: int = 5
+    ADMIN_ID: Optional[int] = None
     ADMIN_IDS: str = ""
 
     model_config = SettingsConfigDict(
@@ -53,8 +54,26 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    def get_whitelist_user_ids(self) -> set[int]:
+    def get_admin_ids(self) -> set[int]:
+        """Returns set of user IDs who are actual bot administrators/owners."""
         ids = set()
+        if self.DEVELOPER_CHAT_ID:
+            ids.add(self.DEVELOPER_CHAT_ID)
+        if self.ADMIN_ID:
+            ids.add(self.ADMIN_ID)
+        if self.ADMIN_IDS:
+            for part in str(self.ADMIN_IDS).split(","):
+                if part.strip().isdigit():
+                    ids.add(int(part.strip()))
+        return ids
+
+    def is_admin(self, user_id: int) -> bool:
+        """Strictly checks if user is the bot administrator/owner (access to stats, db export, etc.)."""
+        return user_id in self.get_admin_ids()
+
+    def get_whitelist_user_ids(self) -> set[int]:
+        """Returns set of user IDs who have bypass privileges for essay limits (includes admins)."""
+        ids = set(self.get_admin_ids())
         if self.WHITELIST_USER_ID:
             ids.add(self.WHITELIST_USER_ID)
         if self.WHITELIST_ID:
@@ -63,19 +82,10 @@ class Settings(BaseSettings):
             for part in str(self.WHITELIST).split(","):
                 if part.strip().isdigit():
                     ids.add(int(part.strip()))
-        if self.ADMIN_IDS:
-            for part in str(self.ADMIN_IDS).split(","):
-                if part.strip().isdigit():
-                    ids.add(int(part.strip()))
-        if self.DEVELOPER_CHAT_ID:
-            ids.add(self.DEVELOPER_CHAT_ID)
         return ids
 
     def is_whitelist_user(self, user_id: int) -> bool:
         return user_id in self.get_whitelist_user_ids()
-
-    def is_admin(self, user_id: int) -> bool:
-        return self.is_whitelist_user(user_id)
 
 
 settings = Settings()
