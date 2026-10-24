@@ -48,7 +48,7 @@ def format_overview_text(data: dict) -> str:
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     
     return (
-        f"📊 <b>IELTS BOT — BOSH ADMIN STATISTIKASI</b>\n"
+        f"📊 <b>IELTS BOT — DEVELOPER STATISTIKASI</b>\n"
         f"<i>Yangilangan vaqt: {now_str}</i>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"👥 <b>Foydalanuvchilar oqimi:</b>\n"
@@ -140,13 +140,13 @@ def format_bands_distribution_text(data: dict) -> str:
     return "\n".join(lines)
 
 
-@admin_router.message(Command("stats", "statistika", "admin"))
+@admin_router.message(Command("stats", "statistika", "admin", "dev", "dashboard"))
 async def cmd_admin_stats(message: types.Message):
-    """Entrypoint for admin stats dashboard."""
+    """Entrypoint for developer and admin stats dashboard."""
     user_id = message.from_user.id if message.from_user else 0
-    if not settings.is_admin(user_id):
-        return  # Silently ignore non-admins to prevent unauthorized probe
-
+    if not (settings.is_admin(user_id) or user_id == settings.DEVELOPER_CHAT_ID):
+        return  # Silently ignore non-authorized users
+    
     stats = await get_system_admin_stats()
     text = format_overview_text(stats)
     kb = get_admin_stats_keyboard("overview")
@@ -157,7 +157,7 @@ async def cmd_admin_stats(message: types.Message):
 async def cb_admin_stats(callback: types.CallbackQuery):
     """Handles tab switches and actions for admin stats."""
     user_id = callback.from_user.id
-    if not settings.is_admin(user_id):
+    if not (settings.is_admin(user_id) or user_id == settings.DEVELOPER_CHAT_ID):
         await callback.answer("Ruxsat berilmagan!", show_alert=True)
         return
 
