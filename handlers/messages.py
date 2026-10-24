@@ -2,7 +2,7 @@ import html
 import json
 import logging
 from typing import Optional
-from aiogram import Router, types, F
+from aiogram import Bot, Router, types, F
 from aiogram.filters import CommandStart, Command
 from aiogram.enums import ChatType
 from aiogram.fsm.context import FSMContext
@@ -56,7 +56,7 @@ router = Router()
 PENDING_TOPIC_REPLACEMENTS = {}
 
 
-async def is_group_admin(bot: types.Bot, chat_id: int, user: Optional[types.User]) -> bool:
+async def is_group_admin(bot: Bot, chat_id: int, user: Optional[types.User]) -> bool:
     """Checks if user has group administrator privileges."""
     if not user:
         return False
@@ -72,7 +72,7 @@ async def is_group_admin(bot: types.Bot, chat_id: int, user: Optional[types.User
     return role == "admin"
 
 
-async def is_teacher_or_admin(bot: types.Bot, chat_id: int, user: Optional[types.User]) -> bool:
+async def is_teacher_or_admin(bot: Bot, chat_id: int, user: Optional[types.User]) -> bool:
     """Checks if user is recognized as a teacher or admin in this group."""
     if not user:
         return False
